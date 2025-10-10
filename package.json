@@ -1,0 +1,14 @@
+{
+  "name": "floating-camera",
+  "version": "1.0.0",
+  "description": "Floating circular camera window (Electron)",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.2.0"
+  }
+}
