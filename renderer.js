@@ -93,7 +93,7 @@
         // Restore to previous position with size 250
         const current = await window.electronAPI?.getBounds?.();
         const end = prevBounds && typeof prevBounds.x === 'number' && typeof prevBounds.y === 'number'
-          ? { x: prevBounds.x, y: prevBounds.y, width: 250, height: 250 }
+          ? { x: prevBounds.x, y: prevBounds.y, width: prevBounds.width, height: prevBounds.height }
           : await window.electronAPI?.getCenteredBounds?.(250);
         await animateBounds(current, end, DURATION);
         circle?.classList.remove('locked');
@@ -138,6 +138,29 @@
 
   circle?.addEventListener('pointerup', endDrag);
   circle?.addEventListener('pointercancel', endDrag);
+
+  const SIZE_PRESETS = [150, 250, 350, 450, 550];
+  window.addEventListener('keydown', async (e) => {
+    if (e.code !== 'KeyS') return;
+    try {
+      const b = await window.electronAPI?.getBounds?.();
+      if (!b) return;
+      const side = Math.min(b.width, b.height);
+      const exactIndex = SIZE_PRESETS.indexOf(side);
+      if (exactIndex === -1) {
+        let nearest = SIZE_PRESETS[0];
+        let minDiff = Math.abs(SIZE_PRESETS[0] - side);
+        for (let i = 1; i < SIZE_PRESETS.length; i++) {
+          const d = Math.abs(SIZE_PRESETS[i] - side);
+          if (d < minDiff) { minDiff = d; nearest = SIZE_PRESETS[i]; }
+        }
+        await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: nearest, height: nearest });
+        return;
+      }
+      const next = SIZE_PRESETS[(exactIndex + 1) % SIZE_PRESETS.length];
+      await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: next, height: next });
+    } catch (_) {}
+  });
 
   // Start immediately
   startCamera();
