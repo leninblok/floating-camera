@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, screen } = require('electron');
 const path = require('path');
 
 let mainWindow;
@@ -103,4 +103,16 @@ ipcMain.handle('app:centerWindow', (_event, size) => {
 ipcMain.handle('app:setResizable', (_event, resizable) => {
   if (!mainWindow) return;
   try { mainWindow.setResizable(Boolean(resizable)); } catch (_) {}
+});
+
+// Return target centered bounds for a given square size without moving the window
+ipcMain.handle('app:getCenteredBounds', (_event, size) => {
+  if (!mainWindow) return null;
+  const current = mainWindow.getBounds();
+  const s = Math.max(100, Number(size) || 750);
+  const display = screen.getDisplayMatching(current);
+  const wa = display.workArea;
+  const x = Math.round(wa.x + (wa.width - s) / 2);
+  const y = Math.round(wa.y + (wa.height - s) / 2);
+  return { x, y, width: s, height: s };
 });

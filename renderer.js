@@ -6,6 +6,10 @@
 
   let enlarged = false;
   let prevBounds = null; // { x, y, width, height }
+  const DURATION = 200; // ms
+  let isDragging = false;
+  let dragStartMouse = null; // { x, y }
+  let dragStartWin = null;   // { x, y, width, height }
 
   async function startCamera() {
     try {
@@ -43,34 +47,97 @@
   closeBtn?.addEventListener('click', () => {
     window.electronAPI?.closeApp?.();
   });
+  // Avoid bubbling clicks on close to circle dblclick
+  closeBtn?.addEventListener('dblclick', (e) => e.stopPropagation());
 
-  // Toggle enlarge on key "S"
-  document.addEventListener('keydown', async (e) => {
-    if ((e.key || '').toLowerCase() !== 's') return;
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function animateBounds(start, end, duration = DURATION) {
+    return new Promise((resolve) => {
+      const t0 = performance.now();
+      function step(now) {
+        const p = Math.min(1, (now - t0) / Math.max(1, duration));
+        const e = easeInOutCubic(p);
+        const x = Math.round(start.x + (end.x - start.x) * e);
+        const y = Math.round(start.y + (end.y - start.y) * e);
+        const w = Math.round(start.width + (end.width - start.width) * e);
+        const h = Math.round(start.height + (end.height - start.height) * e);
+        window.electronAPI?.setBounds?.({ x, y, width: w, height: h });
+        if (p < 1) {
+          requestAnimationFrame(step);
+        } else {
+          resolve();
+        }
+      }
+      requestAnimationFrame(step);
+    });
+  }
+
+  // Toggle enlarge on double-click anywhere on circle
+  circle?.addEventListener('dblclick', async () => {
     try {
       if (!enlarged) {
-        // Save current position and size
-        prevBounds = await window.electronAPI?.getBounds?.();
-        // Lock resizing and dragging
+        // Save current bounds
+        const start = await window.electronAPI?.getBounds?.();
+        prevBounds = start;
+        // Compute centered target bounds for 750
+        const end = await window.electronAPI?.getCenteredBounds?.(750);
+        // Lock resizing and dragging, then animate
         await window.electronAPI?.setResizable?.(false);
         circle?.classList.add('locked');
-        // Center and enlarge to 1000x1000
-        await window.electronAPI?.centerWindow?.(750);
+        await animateBounds(start, end, DURATION);
         enlarged = true;
       } else {
-        // Restore drag and resizing
+        // Restore to previous position with size 250
+        const current = await window.electronAPI?.getBounds?.();
+        const end = prevBounds && typeof prevBounds.x === 'number' && typeof prevBounds.y === 'number'
+          ? { x: prevBounds.x, y: prevBounds.y, width: 250, height: 250 }
+          : await window.electronAPI?.getCenteredBounds?.(250);
+        await animateBounds(current, end, DURATION);
         circle?.classList.remove('locked');
         await window.electronAPI?.setResizable?.(true);
-        // Restore previous position, set size to 250x250
-        if (prevBounds && typeof prevBounds.x === 'number' && typeof prevBounds.y === 'number') {
-          await window.electronAPI?.setBounds?.({ x: prevBounds.x, y: prevBounds.y, width: 250, height: 250 });
-        } else {
-          await window.electronAPI?.setSize?.(250, 250);
-        }
         enlarged = false;
       }
     } catch (_) { /* noop */ }
   });
+
+  // Custom dragging over the full circle (disabled when enlarged)
+  circle?.addEventListener('pointerdown', async (e) => {
+    if (enlarged) return; // locked while enlarged
+    // ignore right/middle clicks
+    if (e.button !== 0) return;
+    try {
+      const b = await window.electronAPI?.getBounds?.();
+      isDragging = true;
+      dragStartMouse = { x: e.screenX, y: e.screenY };
+      dragStartWin = { x: b.x, y: b.y, width: b.width, height: b.height };
+      circle.style.cursor = 'default';
+      circle.setPointerCapture?.(e.pointerId);
+    } catch (_) {}
+  });
+
+  circle?.addEventListener('pointermove', (e) => {
+    if (!isDragging || !dragStartMouse || !dragStartWin) return;
+    const dx = e.screenX - dragStartMouse.x;
+    const dy = e.screenY - dragStartMouse.y;
+    const nx = Math.round(dragStartWin.x + dx);
+    const ny = Math.round(dragStartWin.y + dy);
+    window.electronAPI?.setBounds?.({ x: nx, y: ny, width: dragStartWin.width, height: dragStartWin.height });
+  });
+
+  const endDrag = (e) => {
+    if (!isDragging) return;
+    isDragging = false;
+    dragStartMouse = null;
+    dragStartWin = null;
+    circle.style.cursor = '';
+    try { circle.releasePointerCapture?.(e.pointerId); } catch (_) {}
+  };
+
+  circle?.addEventListener('pointerup', endDrag);
+  circle?.addEventListener('pointercancel', endDrag);
 
   // Start immediately
   startCamera();

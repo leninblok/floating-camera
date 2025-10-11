@@ -17,9 +17,8 @@
       background: transparent; /* critical for transparent window */
       overflow: hidden;
     }
-    /* Main circular container is draggable */
+    /* Main circular container: custom JS handles dragging */
     .circle {
-      -webkit-app-region: drag; /* allow drag to move frameless window */
       position: relative;
       width: 100%;
       height: 100%;
@@ -28,10 +27,11 @@
       /* subtle translucent border */
       box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35);
       backdrop-filter: none; /* keeps it simple and performant */
+      cursor: default;
     }
     /* When enlarged, disable dragging */
     .circle.locked {
-      -webkit-app-region: no-drag;
+      cursor: default;
     }
     video {
       width: 100%;
