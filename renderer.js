@@ -142,6 +142,7 @@
   const SIZE_PRESETS = [150, 250, 350, 450, 550];
   window.addEventListener('keydown', async (e) => {
     if (e.code !== 'KeyS') return;
+    if (enlarged) return;
     try {
       const b = await window.electronAPI?.getBounds?.();
       if (!b) return;

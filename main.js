@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, nativeTheme, screen } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 let mainWindow;
@@ -24,13 +25,65 @@ function clampToPrimary(bounds) {
   return { x, y, width, height };
 }
 
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function loadLastSize() {
+  try {
+    const p = getSettingsPath();
+    if (!fs.existsSync(p)) return null;
+    const raw = fs.readFileSync(p, 'utf8');
+    const data = JSON.parse(raw || '{}');
+    const s = Number(data && data.lastSize);
+    if (!Number.isFinite(s)) return null;
+    return Math.max(100, Math.min(s, 2000));
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveLastSize(size) {
+  try {
+    const p = getSettingsPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ lastSize: Math.max(100, Math.min(Number(size) || 0, 2000)) }), 'utf8');
+  } catch (_) {}
+}
+
+function loadLastState() {
+  try {
+    const p = getSettingsPath();
+    if (!fs.existsSync(p)) return null;
+    const raw = fs.readFileSync(p, 'utf8');
+    const data = JSON.parse(raw || '{}');
+    const size = Math.max(100, Math.min(Number(data.lastSize) || 0, 2000));
+    const x = typeof data.lastX === 'number' ? Math.floor(data.lastX) : null;
+    const y = typeof data.lastY === 'number' ? Math.floor(data.lastY) : null;
+    if (!size || x === null || y === null) return null;
+    return { x, y, size };
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveLastState(bounds) {
+  try {
+    const p = getSettingsPath();
+    const side = Math.max(100, Math.min(Math.min(bounds.width, bounds.height) || 0, 2000));
+    const payload = { lastSize: side, lastX: bounds.x, lastY: bounds.y };
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(payload), 'utf8');
+  } catch (_) {}
+}
+
 function createWindow(initialSize = 250) {
   mainWindow = new BrowserWindow({
     width: initialSize,
     height: initialSize,
     frame: false,
     transparent: true,
-    resizable: true, // allow manual resize; slider will also control it
+    resizable: false,
     alwaysOnTop: true,
     hasShadow: false,
     backgroundColor: '#00000000',
@@ -61,14 +114,27 @@ function createWindow(initialSize = 250) {
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
   mainWindow.once('ready-to-show', () => {
-    const primary = screen.getPrimaryDisplay();
-    const wa = primary.workArea;
-    const size = Math.max(100, initialSize);
-    const x = Math.round(wa.x + wa.width - size);
-    const y = Math.round(wa.y);
-    const clamped = clampToPrimary({ x, y, width: size, height: size });
+    const state = loadLastState();
+    let clamped;
+    if (state) {
+      clamped = clampToPrimary({ x: state.x, y: state.y, width: state.size, height: state.size });
+    } else {
+      const primary = screen.getPrimaryDisplay();
+      const wa = primary.workArea;
+      const size = Math.max(100, initialSize);
+      const x = Math.round(wa.x + wa.width - size);
+      const y = Math.round(wa.y);
+      clamped = clampToPrimary({ x, y, width: size, height: size });
+    }
     try { mainWindow.setBounds(clamped, false); } catch (_) {}
     mainWindow.show();
+  });
+
+  mainWindow.on('close', () => {
+    try {
+      const b = mainWindow.getBounds();
+      saveLastState(b);
+    } catch (_) {}
   });
 
   mainWindow.on('closed', () => {
@@ -107,7 +173,8 @@ function createWindow(initialSize = 250) {
 app.whenReady().then(() => {
   // Avoid dark overlay effects on transparent windows
   try { nativeTheme.themeSource = 'light'; } catch (_) {}
-  createWindow(250);
+  const last = loadLastSize();
+  createWindow(last || 250);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -169,7 +236,7 @@ ipcMain.handle('app:centerWindow', (_event, size) => {
 
 ipcMain.handle('app:setResizable', (_event, resizable) => {
   if (!mainWindow) return;
-  try { mainWindow.setResizable(Boolean(resizable)); } catch (_) {}
+  try { mainWindow.setResizable(false); } catch (_) {}
 });
 
 // Return target centered bounds for a given square size without moving the window
