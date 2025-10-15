@@ -25,15 +25,24 @@
       border-radius: 50%;
       overflow: hidden;
       /* subtle translucent border */
-      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35);
+      box-sizing: border-box;
+      border: 2px solid rgba(255, 255, 255, 1);
       backdrop-filter: none; /* keeps it simple and performant */
       cursor: default;
+    }
+    .backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.25);
+      z-index: 0;
     }
     /* When enlarged, disable dragging */
     .circle.locked {
       cursor: default;
     }
     video {
+      position: relative;
+      z-index: 1;
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -80,6 +89,7 @@
 </head>
 <body>
   <div class="circle" id="circle">
+    <div class="backdrop"></div>
     <video id="cam" autoplay playsinline muted></video>
     <div id="err" class="error"></div>
   </div>

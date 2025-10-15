@@ -3,13 +3,14 @@
   const closeBtn = document.getElementById('close');
   const circle = document.getElementById('circle');
   const errBox = document.getElementById('err');
-
+  
   let enlarged = false;
   let prevBounds = null; // { x, y, width, height }
   const DURATION = 200; // ms
   let isDragging = false;
   let dragStartMouse = null; // { x, y }
   let dragStartWin = null;   // { x, y, width, height }
+  let borderEnabled = true;
 
   async function startCamera() {
     try {
@@ -41,6 +42,20 @@
     if (!errBox) return;
     errBox.textContent = '';
     errBox.style.display = 'none';
+  }
+
+  function applyBorderForSide(side) {
+    if (!circle || !Number.isFinite(side)) return;
+    if (!borderEnabled) {
+      circle.style.borderWidth = '0px';
+      circle.style.borderStyle = 'solid';
+      return;
+    }
+    let w = '1px';
+    if (side >= 450) w = '2px';
+    else if (side >= 250) w = '1px';
+    circle.style.borderWidth = w;
+    circle.style.borderStyle = 'solid';
   }
 
   // Close app
@@ -89,6 +104,7 @@
         circle?.classList.add('locked');
         await animateBounds(start, end, DURATION);
         enlarged = true;
+        applyBorderForSide(750);
       } else {
         // Restore to previous position with size 250
         const current = await window.electronAPI?.getBounds?.();
@@ -99,6 +115,8 @@
         circle?.classList.remove('locked');
         await window.electronAPI?.setResizable?.(true);
         enlarged = false;
+        const restoredSide = end && end.width ? Math.min(end.width, end.height) : 250;
+        applyBorderForSide(restoredSide);
       }
     } catch (_) { /* noop */ }
   });
@@ -141,6 +159,15 @@
 
   const SIZE_PRESETS = [150, 250, 350, 450, 550];
   window.addEventListener('keydown', async (e) => {
+    if (e.code === 'KeyB') {
+      try {
+        borderEnabled = !borderEnabled;
+        await window.electronAPI?.setBorderEnabled?.(borderEnabled);
+        const b = await window.electronAPI?.getBounds?.();
+        if (b) applyBorderForSide(Math.min(b.width, b.height));
+      } catch (_) {}
+      return;
+    }
     if (e.code !== 'KeyS') return;
     if (enlarged) return;
     try {
@@ -156,13 +183,23 @@
           if (d < minDiff) { minDiff = d; nearest = SIZE_PRESETS[i]; }
         }
         await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: nearest, height: nearest });
+        applyBorderForSide(nearest);
         return;
       }
       const next = SIZE_PRESETS[(exactIndex + 1) % SIZE_PRESETS.length];
       await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: next, height: next });
+      applyBorderForSide(next);
     } catch (_) {}
   });
 
   // Start immediately
   startCamera();
+  (async () => {
+    try {
+      const stored = await window.electronAPI?.getBorderEnabled?.();
+      if (typeof stored === 'boolean') borderEnabled = stored;
+      const b = await window.electronAPI?.getBounds?.();
+      if (b) applyBorderForSide(Math.min(b.width, b.height));
+    } catch (_) {}
+  })();
 })();

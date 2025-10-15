@@ -8,4 +8,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   centerWindow: (size) => ipcRenderer.invoke('app:centerWindow', size),
   setResizable: (resizable) => ipcRenderer.invoke('app:setResizable', resizable),
   getCenteredBounds: (size) => ipcRenderer.invoke('app:getCenteredBounds', size),
+  getBorderEnabled: () => ipcRenderer.invoke('app:getBorderEnabled'),
+  setBorderEnabled: (enabled) => ipcRenderer.invoke('app:setBorderEnabled', enabled),
 });

@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 let mainWindow;
+let borderEnabled = true;
 function clampToPrimary(bounds) {
   const primary = screen.getPrimaryDisplay();
   const wa = primary.workArea;
@@ -60,6 +61,7 @@ function loadLastState() {
     const size = Math.max(100, Math.min(Number(data.lastSize) || 0, 2000));
     const x = typeof data.lastX === 'number' ? Math.floor(data.lastX) : null;
     const y = typeof data.lastY === 'number' ? Math.floor(data.lastY) : null;
+    if (typeof data.borderEnabled === 'boolean') borderEnabled = data.borderEnabled;
     if (!size || x === null || y === null) return null;
     return { x, y, size };
   } catch (_) {
@@ -71,7 +73,7 @@ function saveLastState(bounds) {
   try {
     const p = getSettingsPath();
     const side = Math.max(100, Math.min(Math.min(bounds.width, bounds.height) || 0, 2000));
-    const payload = { lastSize: side, lastX: bounds.x, lastY: bounds.y };
+    const payload = { lastSize: side, lastX: bounds.x, lastY: bounds.y, borderEnabled: !!borderEnabled };
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(payload), 'utf8');
   } catch (_) {}
@@ -173,6 +175,8 @@ function createWindow(initialSize = 250) {
 app.whenReady().then(() => {
   // Avoid dark overlay effects on transparent windows
   try { nativeTheme.themeSource = 'light'; } catch (_) {}
+  // Initialize borderEnabled as early as possible
+  try { loadLastState(); } catch (_) {}
   const last = loadLastSize();
   createWindow(last || 250);
 
@@ -248,4 +252,18 @@ ipcMain.handle('app:getCenteredBounds', (_event, size) => {
   const x = Math.round(wa.x + (wa.width - s) / 2);
   const y = Math.round(wa.y + (wa.height - s) / 2);
   return clampToPrimary({ x, y, width: s, height: s });
+});
+
+ipcMain.handle('app:getBorderEnabled', () => {
+  return !!borderEnabled;
+});
+
+ipcMain.handle('app:setBorderEnabled', (_event, enabled) => {
+  borderEnabled = !!enabled;
+  try {
+    if (mainWindow) {
+      const b = mainWindow.getBounds();
+      saveLastState(b);
+    }
+  } catch (_) {}
 });

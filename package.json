@@ -6,9 +6,20 @@
   "author": "",
   "license": "MIT",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder -m"
+  },
+  "build": {
+    "appId": "com.example.floatingcamera",
+    "mac": {
+      "target": "dmg",
+      "extendInfo": {
+        "NSCameraUseContinuityCameraDeviceType": true
+      }
+    }
   },
   "devDependencies": {
-    "electron": "^31.2.0"
+    "electron": "^31.2.0",
+    "electron-builder": "^24.13.3"
   }
 }
