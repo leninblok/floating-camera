@@ -51,9 +51,9 @@
       circle.style.borderStyle = 'solid';
       return;
     }
-    let w = '1px';
-    if (side >= 450) w = '2px';
-    else if (side >= 250) w = '1px';
+    let w = '3px';
+    if (side >= 350) w = '6px';
+    else if (side >= 250) w = '3px';
     circle.style.borderWidth = w;
     circle.style.borderStyle = 'solid';
   }
