@@ -4,6 +4,7 @@ const path = require('path');
 
 let mainWindow;
 let borderEnabled = true;
+let mirrorEnabled = false;
 function clampToPrimary(bounds) {
   const primary = screen.getPrimaryDisplay();
   const wa = primary.workArea;
@@ -38,6 +39,7 @@ function loadLastState() {
     const x = typeof data.lastX === 'number' ? Math.floor(data.lastX) : null;
     const y = typeof data.lastY === 'number' ? Math.floor(data.lastY) : null;
     if (typeof data.borderEnabled === 'boolean') borderEnabled = data.borderEnabled;
+    if (typeof data.mirrorEnabled === 'boolean') mirrorEnabled = data.mirrorEnabled;
     if (!size || x === null || y === null) return null;
     return { x, y, size };
   } catch (_) {
@@ -49,7 +51,7 @@ function saveLastState(bounds) {
   try {
     const p = getSettingsPath();
     const side = Math.max(100, Math.min(Math.min(bounds.width, bounds.height) || 0, 2000));
-    const payload = { lastSize: side, lastX: bounds.x, lastY: bounds.y, borderEnabled: !!borderEnabled };
+    const payload = { lastSize: side, lastX: bounds.x, lastY: bounds.y, borderEnabled: !!borderEnabled, mirrorEnabled: !!mirrorEnabled };
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(payload), 'utf8');
   } catch (_) {}
@@ -205,6 +207,20 @@ ipcMain.handle('app:getBorderEnabled', () => {
 
 ipcMain.handle('app:setBorderEnabled', (_event, enabled) => {
   borderEnabled = !!enabled;
+  try {
+    if (mainWindow) {
+      const b = mainWindow.getBounds();
+      saveLastState(b);
+    }
+  } catch (_) {}
+});
+
+ipcMain.handle('app:getMirrorEnabled', () => {
+  return !!mirrorEnabled;
+});
+
+ipcMain.handle('app:setMirrorEnabled', (_event, enabled) => {
+  mirrorEnabled = !!enabled;
   try {
     if (mainWindow) {
       const b = mainWindow.getBounds();

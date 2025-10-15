@@ -10,6 +10,7 @@
   let dragStartMouse = null; // { x, y }
   let dragStartWin = null;   // { x, y, width, height }
   let borderEnabled = true;
+  let mirrorEnabled = false;
 
   async function startCamera() {
     try {
@@ -72,6 +73,7 @@
         const w = Math.round(start.width + (end.width - start.width) * e);
         const h = Math.round(start.height + (end.height - start.height) * e);
         window.electronAPI?.setBounds?.({ x, y, width: w, height: h });
+        applyBorderForSide(Math.min(w, h));
         if (p < 1) {
           requestAnimationFrame(step);
         } else {
@@ -151,6 +153,14 @@
 
   const SIZE_PRESETS = [150, 250, 350, 450, 550];
   window.addEventListener('keydown', async (e) => {
+    if (e.code === 'KeyH') {
+      try {
+        video?.classList.toggle('mirror');
+        mirrorEnabled = !!video?.classList.contains('mirror');
+        await window.electronAPI?.setMirrorEnabled?.(mirrorEnabled);
+      } catch (_) {}
+      return;
+    }
     if (e.code === 'KeyB') {
       try {
         borderEnabled = !borderEnabled;
@@ -174,12 +184,14 @@
           const d = Math.abs(SIZE_PRESETS[i] - side);
           if (d < minDiff) { minDiff = d; nearest = SIZE_PRESETS[i]; }
         }
-        await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: nearest, height: nearest });
+        const end = { x: b.x, y: b.y, width: nearest, height: nearest };
+        await animateBounds(b, end, DURATION);
         applyBorderForSide(nearest);
         return;
       }
       const next = SIZE_PRESETS[(exactIndex + 1) % SIZE_PRESETS.length];
-      await window.electronAPI?.setBounds?.({ x: b.x, y: b.y, width: next, height: next });
+      const end = { x: b.x, y: b.y, width: next, height: next };
+      await animateBounds(b, end, DURATION);
       applyBorderForSide(next);
     } catch (_) {}
   });
@@ -190,6 +202,15 @@
     try {
       const stored = await window.electronAPI?.getBorderEnabled?.();
       if (typeof stored === 'boolean') borderEnabled = stored;
+      const m = await window.electronAPI?.getMirrorEnabled?.();
+      if (typeof m === 'boolean') {
+        mirrorEnabled = m;
+        if (mirrorEnabled) {
+          try { video?.classList.add('mirror'); } catch (_) {}
+        } else {
+          try { video?.classList.remove('mirror'); } catch (_) {}
+        }
+      }
       const b = await window.electronAPI?.getBounds?.();
       if (b) applyBorderForSide(Math.min(b.width, b.height));
     } catch (_) {}
