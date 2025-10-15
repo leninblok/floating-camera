@@ -1,6 +1,5 @@
 (() => {
   const video = document.getElementById('cam');
-  const closeBtn = document.getElementById('close');
   const circle = document.getElementById('circle');
   const errBox = document.getElementById('err');
   
@@ -57,13 +56,6 @@
     circle.style.borderWidth = w;
     circle.style.borderStyle = 'solid';
   }
-
-  // Close app
-  closeBtn?.addEventListener('click', () => {
-    window.electronAPI?.closeApp?.();
-  });
-  // Avoid bubbling clicks on close to circle dblclick
-  closeBtn?.addEventListener('dblclick', (e) => e.stopPropagation());
 
   function easeInOutCubic(t) {
     return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;

@@ -17,39 +17,15 @@ function clampToPrimary(bounds) {
   const height = Math.min(Math.max(100, Math.round(bounds.height || 0)), insetH || Math.max(100, Math.round(bounds.height || 0)));
   let x = Math.round(typeof bounds.x === 'number' ? bounds.x : insetX);
   let y = Math.round(typeof bounds.y === 'number' ? bounds.y : insetY);
-
   if (x < insetX) x = insetX;
   if (y < insetY) y = insetY;
   if (x + width > insetX + insetW) x = insetX + insetW - width;
   if (y + height > insetY + insetH) y = insetY + insetH - height;
-
   return { x, y, width, height };
 }
 
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
-}
-
-function loadLastSize() {
-  try {
-    const p = getSettingsPath();
-    if (!fs.existsSync(p)) return null;
-    const raw = fs.readFileSync(p, 'utf8');
-    const data = JSON.parse(raw || '{}');
-    const s = Number(data && data.lastSize);
-    if (!Number.isFinite(s)) return null;
-    return Math.max(100, Math.min(s, 2000));
-  } catch (_) {
-    return null;
-  }
-}
-
-function saveLastSize(size) {
-  try {
-    const p = getSettingsPath();
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ lastSize: Math.max(100, Math.min(Number(size) || 0, 2000)) }), 'utf8');
-  } catch (_) {}
 }
 
 function loadLastState() {
@@ -101,11 +77,8 @@ function createWindow(initialSize = 250) {
     },
   });
 
-  // Stay above everything. On macOS use a higher level.
   try {
-    // On macOS, set a high window level so it floats over fullscreen apps too.
     mainWindow.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'pop-up-menu');
-    // Visible on all spaces for macOS
     if (process.platform === 'darwin') {
       mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
@@ -173,12 +146,9 @@ function createWindow(initialSize = 250) {
 }
 
 app.whenReady().then(() => {
-  // Avoid dark overlay effects on transparent windows
   try { nativeTheme.themeSource = 'light'; } catch (_) {}
-  // Initialize borderEnabled as early as possible
-  try { loadLastState(); } catch (_) {}
-  const last = loadLastSize();
-  createWindow(last || 250);
+  const state = loadLastState();
+  createWindow((state && state.size) || 250);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -195,20 +165,6 @@ app.on('window-all-closed', () => {
 });
 
 // IPC handlers
-ipcMain.handle('app:close', () => {
-  if (mainWindow) mainWindow.close();
-});
-
-ipcMain.handle('app:setSize', (_event, width, height) => {
-  if (!mainWindow) return;
-  const w = Math.max(100, Math.min(Number(width) || 200, 2000));
-  const h = Math.max(100, Math.min(Number(height) || 200, 2000));
-  const side = Math.max(100, Math.min(w, h));
-  const current = mainWindow.getBounds();
-  const target = clampToPrimary({ x: current.x, y: current.y, width: side, height: side });
-  try { mainWindow.setBounds(target, false); } catch (_) {}
-});
-
 ipcMain.handle('app:getBounds', () => {
   if (!mainWindow) return null;
   return mainWindow.getBounds();
@@ -225,17 +181,6 @@ ipcMain.handle('app:setBounds', (_event, bounds) => {
     height: side || mainWindow.getBounds().height,
   });
   try { mainWindow.setBounds(target, false); } catch (_) {}
-});
-
-ipcMain.handle('app:centerWindow', (_event, size) => {
-  if (!mainWindow) return;
-  const primary = screen.getPrimaryDisplay();
-  const wa = primary.workArea;
-  const side = Math.max(100, Number(size) || 500);
-  const x = Math.round(wa.x + (wa.width - side) / 2);
-  const y = Math.round(wa.y + (wa.height - side) / 2);
-  const clamped = clampToPrimary({ x, y, width: side, height: side });
-  try { mainWindow.setBounds(clamped, false); } catch (_) {}
 });
 
 ipcMain.handle('app:setResizable', (_event, resizable) => {
