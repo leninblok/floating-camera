@@ -1,25 +1,58 @@
 {
   "name": "floating-camera",
-  "version": "1.0.0",
-  "description": "Floating circular camera window (Electron)",
+  "version": "1.1.0",
+  "description": "Always-on-top circular camera window for macOS",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leninblok/floating-camera.git"
+  },
   "author": "",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
-    "start": "electron .",
-    "dist": "electron-builder -m"
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/prepare-macos-package.js && node --check scripts/require-macos-release-credentials.js",
+    "dist": "electron-builder --mac",
+    "dist:mac:arm64": "electron-builder --mac --arm64",
+    "dist:mac:x64": "electron-builder --mac --x64",
+    "verify:mac": "bash scripts/verify-macos-release.sh"
   },
   "build": {
-    "appId": "com.example.floatingcamera",
+    "appId": "io.github.leninblok.floatingcamera",
+    "productName": "Floating Camera",
+    "asar": true,
+    "beforePack": "scripts/prepare-macos-package.js",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "package.json"
+    ],
     "mac": {
-      "target": "dmg",
+      "category": "public.app-category.utilities",
+      "minimumSystemVersion": "12.0.0",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "forceCodeSigning": true,
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "notarize": true,
       "extendInfo": {
+        "NSCameraUsageDescription": "Floating Camera показывает изображение с выбранной камеры в плавающем окне.",
         "NSCameraUseContinuityCameraDeviceType": true
       }
     }
   },
   "devDependencies": {
-    "electron": "^31.2.0",
-    "electron-builder": "^24.13.3"
+    "@electron/notarize": "3.1.2",
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0"
   }
 }

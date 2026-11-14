@@ -1,99 +1,48 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'" />
   <title>Floating Camera</title>
   <style>
-    :root {
-      color-scheme: light only;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      margin: 0;
-      padding: 0;
-      background: transparent; /* critical for transparent window */
-      overflow: hidden;
-    }
-    /* Main circular container: custom JS handles dragging */
-    .circle {
-      position: relative;
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      overflow: hidden;
-      /* subtle translucent border */
-      box-sizing: border-box;
-      border: 2px solid rgba(255, 255, 255, 1);
-      backdrop-filter: none; /* keeps it simple and performant */
-      cursor: default;
-    }
-    .backdrop {
-      position: absolute;
-      inset: 0;
-      background: rgba(0,0,0,0.25);
-      z-index: 0;
-    }
-    /* When enlarged, disable dragging */
-    .circle.locked {
-      cursor: default;
-    }
-    video {
-      position: relative;
-      z-index: 1;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      border: 0;
-      display: block;
-      pointer-events: none; /* do not block dragging */
-    }
-    video.mirror { transform: scaleX(-1); transform-origin: center; }
-    /* Close button (non-draggable) */
-    .close-btn {
-      -webkit-app-region: no-drag;
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      border: none;
-      background: rgba(0,0,0,0.55);
-      color: #fff;
-      font-size: 14px;
-      line-height: 20px;
-      text-align: center;
-      cursor: pointer;
-      padding: 0;
-      outline: none;
-    }
-    .close-btn:hover { background: rgba(0,0,0,0.75); }
-    .error {
-      position: absolute;
-      left: 8px;
-      right: 8px;
-      top: 50%;
-      transform: translateY(-50%);
-      background: rgba(0,0,0,0.6);
-      color: #fff;
-      padding: 6px 8px;
-      border-radius: 8px;
-      font-size: 12px;
-      text-align: center;
-      -webkit-app-region: no-drag;
-      display: none;
+    :root { --shadow-inset: 44px; color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    html, body { width: 100%; height: 100%; margin: 0; background: transparent; overflow: hidden; }
+    body { box-sizing: border-box; container-type: size; transition: padding 240ms cubic-bezier(.2, .8, .2, 1); }
+    body.shadow-enabled { padding: var(--shadow-inset); }
+    button { font: inherit; }
+    .circle { position: relative; width: 100%; height: 100%; overflow: hidden; box-sizing: border-box; border: 3px solid #fff; border-radius: 50%; background: #141414; cursor: grab; user-select: none; contain: layout paint; will-change: border-radius, box-shadow; transform: translateZ(0); transition: border-radius 240ms cubic-bezier(.2, .8, .2, 1), border-width 180ms ease, box-shadow 240ms ease; }
+    .circle:active { cursor: grabbing; }
+    .circle.locked { cursor: default; }
+    .circle.rectangle { corner-shape: superellipse(1.5); }
+    .circle.rectangle[data-aspect-ratio="1:1"] { border-radius: 28.571cqh; }
+    .circle.rectangle[data-aspect-ratio="4:5"] { border-radius: 28.571cqh; }
+    .circle.rectangle[data-aspect-ratio="9:16"] { border-radius: 20cqh; }
+    body.shadow-enabled .circle { box-shadow: 0 10px 28px rgba(0, 0, 0, .38), 0 2px 8px rgba(0, 0, 0, .22); }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; transform: translateZ(0); }
+    video.mirror { transform: scaleX(-1); }
+    .scrim { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(transparent 55%, rgba(0, 0, 0, .32)); }
+    .error[hidden] { display: none; }
+    .error { position: absolute; z-index: 2; inset: auto 10px 10px; display: grid; gap: 7px; padding: 9px; border-radius: 10px; background: rgba(118, 20, 20, .94); color: #fff; font-size: 12px; line-height: 1.3; cursor: default; }
+    .error-actions { display: flex; gap: 6px; }
+    .error button { flex: 1; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; background: rgba(0,0,0,.24); color: #fff; padding: 5px; cursor: pointer; }
+    @media (prefers-reduced-motion: reduce) {
+      body, .circle { transition-duration: 0ms !important; }
     }
   </style>
 </head>
 <body>
-  <div class="circle" id="circle">
-    <div class="backdrop"></div>
-    <video id="cam" autoplay playsinline muted></video>
-    <div id="err" class="error"></div>
-  </div>
+  <main id="circle" class="circle" aria-label="Плавающее окно камеры">
+    <video id="cam" autoplay playsinline muted aria-label="Видео с камеры"></video>
+    <div class="scrim"></div>
+    <aside id="err" class="error" hidden aria-live="assertive">
+      <span id="errText"></span>
+      <div class="error-actions">
+        <button id="retryButton" type="button">Повторить</button>
+        <button id="privacyButton" type="button" hidden>Настройки macOS</button>
+      </div>
+    </aside>
+  </main>
   <script src="renderer.js"></script>
 </body>
 </html>

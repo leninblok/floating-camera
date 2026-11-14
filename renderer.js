@@ -2,217 +2,243 @@
   const video = document.getElementById('cam');
   const circle = document.getElementById('circle');
   const errBox = document.getElementById('err');
-  
-  let enlarged = false;
-  let prevBounds = null; // { x, y, width, height }
-  const DURATION = 200; // ms
-  let isDragging = false;
-  let dragStartMouse = null; // { x, y }
-  let dragStartWin = null;   // { x, y, width, height }
-  let borderEnabled = true;
-  let mirrorEnabled = false;
+  const errText = document.getElementById('errText');
+  const retryButton = document.getElementById('retryButton');
+  const privacyButton = document.getElementById('privacyButton');
 
-  async function startCamera() {
-    try {
-      const constraints = {
-        audio: false,
-        video: {
-          facingMode: { ideal: 'user' }, // prefer front camera
-          width: { ideal: 640 },
-          height: { ideal: 640 },
-          frameRate: { ideal: 30 }
-        }
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      video.srcObject = stream;
-      await video.play();
-      hideError();
-    } catch (err) {
-      showError('Не удалось получить доступ к камере. Проверьте разрешения в системе. ' + String(err && err.message ? err.message : err));
-    }
+  const DURATION = 200;
+  let enlarged = false;
+  let prevBounds = null;
+  let isDragging = false;
+  let dragStartMouse = null;
+  let dragStartWindow = null;
+  let borderEnabled = true;
+  let shadowEnabled = true;
+  let mirrorEnabled = false;
+  let shapeMode = 'circle';
+  let aspectRatio = '4:5';
+  let activeStream = null;
+  let selectedDeviceId = null;
+  let cameraStarting = false;
+
+  function isInteractiveTarget(target) {
+    return Boolean(target?.closest?.('button, input, select, textarea, label, a'));
   }
 
-  function showError(msg) {
-    if (!errBox) return;
-    errBox.textContent = msg;
-    errBox.style.display = 'block';
+  function showError(message, canOpenPrivacy = false) {
+    errText.textContent = message;
+    privacyButton.hidden = !canOpenPrivacy;
+    errBox.hidden = false;
   }
 
   function hideError() {
-    if (!errBox) return;
-    errBox.textContent = '';
-    errBox.style.display = 'none';
+    errBox.hidden = true;
+    errText.textContent = '';
+  }
+
+  function stopCamera() {
+    if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
+    activeStream = null;
+    if (video) video.srcObject = null;
   }
 
   function applyBorderForSide(side) {
     if (!circle || !Number.isFinite(side)) return;
-    if (!borderEnabled) {
-      circle.style.borderWidth = '0px';
-      circle.style.borderStyle = 'solid';
-      return;
-    }
-    let w = '3px';
-    if (side >= 350) w = '6px';
-    else if (side >= 250) w = '3px';
-    circle.style.borderWidth = w;
-    circle.style.borderStyle = 'solid';
+    circle.style.borderWidth = borderEnabled ? (side >= 350 ? '4px' : side >= 250 ? '3px' : '2px') : '0px';
   }
 
-  function easeInOutCubic(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  function applyMirror() {
+    video.classList.toggle('mirror', mirrorEnabled);
+  }
+
+  function applyShadow() {
+    document.body.classList.toggle('shadow-enabled', shadowEnabled);
+  }
+
+  function applyShape() {
+    circle.classList.toggle('rectangle', shapeMode === 'rectangle');
+    circle.dataset.aspectRatio = aspectRatio;
+  }
+
+  function resetFocusForManualSize(side) {
+    enlarged = false;
+    prevBounds = null;
+    circle.classList.remove('locked');
+    applyBorderForSide(side);
+  }
+
+  async function refreshCameraDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
+    const found = devices.some((device) => device.deviceId === selectedDeviceId);
+    if (selectedDeviceId && !found) {
+      selectedDeviceId = null;
+      await window.electronAPI.setCameraDeviceId(null);
+    }
+    await window.electronAPI.syncCameraDevices(devices.map((device, index) => ({
+      id: device.deviceId,
+      label: device.label || `Камера ${index + 1}`,
+    })));
+  }
+
+  async function startCamera() {
+    if (cameraStarting) return;
+    cameraStarting = true;
+    hideError();
+    try {
+      const access = await window.electronAPI.ensureCameraAccess();
+      if (!access?.granted) {
+        showError(access?.message || 'Нет доступа к камере.', true);
+        return;
+      }
+      stopCamera();
+      const videoConstraints = selectedDeviceId
+        ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
+        : { facingMode: { ideal: 'user' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+      activeStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints });
+      video.srcObject = activeStream;
+      await video.play();
+      await refreshCameraDevices();
+      hideError();
+    } catch (error) {
+      const detail = error?.name === 'NotAllowedError'
+        ? 'Доступ к камере запрещён. Разрешите его в настройках macOS и перезапустите приложение.'
+        : error?.name === 'NotFoundError'
+          ? 'Камера не найдена. Подключите камеру или выберите другую через меню «Источник».'
+          : `Не удалось включить камеру: ${error?.message || 'неизвестная ошибка'}`;
+      showError(detail, error?.name === 'NotAllowedError');
+    } finally {
+      cameraStarting = false;
+    }
+  }
+
+  function easeInOutCubic(value) {
+    return value < 0.5 ? 4 * value ** 3 : 1 - ((-2 * value + 2) ** 3) / 2;
   }
 
   function animateBounds(start, end, duration = DURATION) {
+    if (!start || !end) return Promise.resolve();
     return new Promise((resolve) => {
-      const t0 = performance.now();
-      function step(now) {
-        const p = Math.min(1, (now - t0) / Math.max(1, duration));
-        const e = easeInOutCubic(p);
-        const x = Math.round(start.x + (end.x - start.x) * e);
-        const y = Math.round(start.y + (end.y - start.y) * e);
-        const w = Math.round(start.width + (end.width - start.width) * e);
-        const h = Math.round(start.height + (end.height - start.height) * e);
-        window.electronAPI?.setBounds?.({ x, y, width: w, height: h });
-        applyBorderForSide(Math.min(w, h));
-        if (p < 1) {
-          requestAnimationFrame(step);
-        } else {
-          resolve();
-        }
-      }
+      const startedAt = performance.now();
+      const step = (now) => {
+        const progress = Math.min(1, (now - startedAt) / Math.max(1, duration));
+        const eased = easeInOutCubic(progress);
+        const width = Math.round(start.width + (end.width - start.width) * eased);
+        const height = Math.round(start.height + (end.height - start.height) * eased);
+        window.electronAPI.setBounds({
+          x: Math.round(start.x + (end.x - start.x) * eased),
+          y: Math.round(start.y + (end.y - start.y) * eased),
+          width,
+          height,
+        });
+        applyBorderForSide(Math.min(width, height));
+        if (progress < 1) requestAnimationFrame(step);
+        else resolve();
+      };
       requestAnimationFrame(step);
     });
   }
 
-  // Toggle enlarge on double-click anywhere on circle
-  circle?.addEventListener('dblclick', async () => {
-    try {
-      if (!enlarged) {
-        // Save current bounds
-        const start = await window.electronAPI?.getBounds?.();
-        prevBounds = start;
-        // Compute centered target bounds for 750
-        const end = await window.electronAPI?.getCenteredBounds?.(750);
-        // Lock resizing and dragging, then animate
-        await window.electronAPI?.setResizable?.(false);
-        circle?.classList.add('locked');
-        await animateBounds(start, end, DURATION);
-        enlarged = true;
-        applyBorderForSide(750);
-      } else {
-        // Restore to previous position with size 250
-        const current = await window.electronAPI?.getBounds?.();
-        const end = prevBounds && typeof prevBounds.x === 'number' && typeof prevBounds.y === 'number'
-          ? { x: prevBounds.x, y: prevBounds.y, width: prevBounds.width, height: prevBounds.height }
-          : await window.electronAPI?.getCenteredBounds?.(250);
-        await animateBounds(current, end, DURATION);
-        circle?.classList.remove('locked');
-        await window.electronAPI?.setResizable?.(true);
-        enlarged = false;
-        const restoredSide = end && end.width ? Math.min(end.width, end.height) : 250;
-        applyBorderForSide(restoredSide);
-      }
-    } catch (_) { /* noop */ }
-  });
+  async function setFocus(enabled) {
+    if (enabled === enlarged) return;
+    if (enabled) {
+      const start = await window.electronAPI.getBounds();
+      const end = await window.electronAPI.getFocusBounds();
+      prevBounds = start;
+      circle.classList.add('locked');
+      await animateBounds(start, end);
+      enlarged = true;
+      applyBorderForSide(750);
+      await window.electronAPI.setFocusEnabled(true);
+      return;
+    }
+    const start = await window.electronAPI.getBounds();
+    const end = prevBounds || await window.electronAPI.getCenteredBounds(250);
+    await animateBounds(start, end);
+    circle.classList.remove('locked');
+    enlarged = false;
+    applyBorderForSide(Math.min(end.width, end.height));
+    await window.electronAPI.setFocusEnabled(false);
+  }
 
-  // Custom dragging over the full circle (disabled when enlarged)
-  circle?.addEventListener('pointerdown', async (e) => {
-    if (enlarged) return; // locked while enlarged
-    // ignore right/middle clicks
-    if (e.button !== 0) return;
-    try {
-      const b = await window.electronAPI?.getBounds?.();
-      isDragging = true;
-      dragStartMouse = { x: e.screenX, y: e.screenY };
-      dragStartWin = { x: b.x, y: b.y, width: b.width, height: b.height };
-      circle.style.cursor = 'default';
-      circle.setPointerCapture?.(e.pointerId);
-    } catch (_) {}
-  });
+  function toggleFocus() {
+    return setFocus(!enlarged);
+  }
 
-  circle?.addEventListener('pointermove', (e) => {
-    if (!isDragging || !dragStartMouse || !dragStartWin) return;
-    const dx = e.screenX - dragStartMouse.x;
-    const dy = e.screenY - dragStartMouse.y;
-    const nx = Math.round(dragStartWin.x + dx);
-    const ny = Math.round(dragStartWin.y + dy);
-    window.electronAPI?.setBounds?.({ x: nx, y: ny, width: dragStartWin.width, height: dragStartWin.height });
+  circle.addEventListener('dblclick', (event) => {
+    if (!isInteractiveTarget(event.target)) toggleFocus().catch(() => {});
   });
-
-  const endDrag = (e) => {
-    if (!isDragging) return;
+  circle.addEventListener('pointerdown', async (event) => {
+    if (enlarged || event.button !== 0 || isInteractiveTarget(event.target)) return;
+    const bounds = await window.electronAPI.getBounds();
+    if (!bounds) return;
+    isDragging = true;
+    dragStartMouse = { x: event.screenX, y: event.screenY };
+    dragStartWindow = bounds;
+    circle.setPointerCapture?.(event.pointerId);
+  });
+  circle.addEventListener('pointermove', (event) => {
+    if (!isDragging || !dragStartMouse || !dragStartWindow) return;
+    window.electronAPI.setBounds({
+      x: Math.round(dragStartWindow.x + event.screenX - dragStartMouse.x),
+      y: Math.round(dragStartWindow.y + event.screenY - dragStartMouse.y),
+      width: dragStartWindow.width,
+      height: dragStartWindow.height,
+    });
+  });
+  const endDrag = (event) => {
     isDragging = false;
     dragStartMouse = null;
-    dragStartWin = null;
-    circle.style.cursor = '';
-    try { circle.releasePointerCapture?.(e.pointerId); } catch (_) {}
+    dragStartWindow = null;
+    try { circle.releasePointerCapture?.(event.pointerId); } catch (_) {}
   };
+  circle.addEventListener('pointerup', endDrag);
+  circle.addEventListener('pointercancel', endDrag);
 
-  circle?.addEventListener('pointerup', endDrag);
-  circle?.addEventListener('pointercancel', endDrag);
+  retryButton.addEventListener('click', startCamera);
+  privacyButton.addEventListener('click', () => window.electronAPI.openCameraPrivacySettings());
+  window.addEventListener('beforeunload', stopCamera);
 
-  const SIZE_PRESETS = [150, 250, 350, 450, 550];
-  window.addEventListener('keydown', async (e) => {
-    if (e.code === 'KeyH') {
-      try {
-        video?.classList.toggle('mirror');
-        mirrorEnabled = !!video?.classList.contains('mirror');
-        await window.electronAPI?.setMirrorEnabled?.(mirrorEnabled);
-      } catch (_) {}
-      return;
-    }
-    if (e.code === 'KeyB') {
-      try {
-        borderEnabled = !borderEnabled;
-        await window.electronAPI?.setBorderEnabled?.(borderEnabled);
-        const b = await window.electronAPI?.getBounds?.();
-        if (b) applyBorderForSide(Math.min(b.width, b.height));
-      } catch (_) {}
-      return;
-    }
-    if (e.code !== 'KeyS') return;
-    if (enlarged) return;
-    try {
-      const b = await window.electronAPI?.getBounds?.();
-      if (!b) return;
-      const side = Math.min(b.width, b.height);
-      const exactIndex = SIZE_PRESETS.indexOf(side);
-      if (exactIndex === -1) {
-        let nearest = SIZE_PRESETS[0];
-        let minDiff = Math.abs(SIZE_PRESETS[0] - side);
-        for (let i = 1; i < SIZE_PRESETS.length; i++) {
-          const d = Math.abs(SIZE_PRESETS[i] - side);
-          if (d < minDiff) { minDiff = d; nearest = SIZE_PRESETS[i]; }
-        }
-        const end = { x: b.x, y: b.y, width: nearest, height: nearest };
-        await animateBounds(b, end, DURATION);
-        applyBorderForSide(nearest);
-        return;
-      }
-      const next = SIZE_PRESETS[(exactIndex + 1) % SIZE_PRESETS.length];
-      const end = { x: b.x, y: b.y, width: next, height: next };
-      await animateBounds(b, end, DURATION);
-      applyBorderForSide(next);
-    } catch (_) {}
+  window.electronAPI.onSetMirror((enabled) => {
+    mirrorEnabled = enabled;
+    applyMirror();
+  });
+  window.electronAPI.onSetBorder(async (enabled) => {
+    borderEnabled = enabled;
+    const bounds = await window.electronAPI.getBounds();
+    if (bounds) applyBorderForSide(Math.min(bounds.width, bounds.height));
+  });
+  window.electronAPI.onSetShadow((enabled) => {
+    shadowEnabled = enabled;
+    applyShadow();
+  });
+  window.electronAPI.onSizeChanged((size) => {
+    if (Number.isFinite(size)) resetFocusForManualSize(size);
+  });
+  window.electronAPI.onSetShape((shape) => {
+    shapeMode = shape.shapeMode;
+    aspectRatio = shape.aspectRatio;
+    applyShape();
+  });
+  window.electronAPI.onSetFocus((enabled) => {
+    setFocus(enabled).catch(() => {});
+  });
+  window.electronAPI.onSetCameraDevice((deviceId) => {
+    selectedDeviceId = deviceId;
+    startCamera();
   });
 
-  // Start immediately
-  startCamera();
   (async () => {
-    try {
-      const stored = await window.electronAPI?.getBorderEnabled?.();
-      if (typeof stored === 'boolean') borderEnabled = stored;
-      const m = await window.electronAPI?.getMirrorEnabled?.();
-      if (typeof m === 'boolean') {
-        mirrorEnabled = m;
-        if (mirrorEnabled) {
-          try { video?.classList.add('mirror'); } catch (_) {}
-        } else {
-          try { video?.classList.remove('mirror'); } catch (_) {}
-        }
-      }
-      const b = await window.electronAPI?.getBounds?.();
-      if (b) applyBorderForSide(Math.min(b.width, b.height));
-    } catch (_) {}
-  })();
+    borderEnabled = await window.electronAPI.getBorderEnabled();
+    shadowEnabled = await window.electronAPI.getShadowEnabled();
+    mirrorEnabled = await window.electronAPI.getMirrorEnabled();
+    ({ shapeMode, aspectRatio } = await window.electronAPI.getShape());
+    applyShape();
+    selectedDeviceId = await window.electronAPI.getCameraDeviceId();
+    applyMirror();
+    applyShadow();
+    const bounds = await window.electronAPI.getBounds();
+    if (bounds) applyBorderForSide(Math.min(bounds.width, bounds.height));
+    await startCamera();
+  })().catch((error) => showError(`Ошибка запуска: ${error?.message || error}`));
 })();
