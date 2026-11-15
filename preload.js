@@ -3,8 +3,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   getBounds: () => ipcRenderer.invoke('app:getBounds'),
   setBounds: (bounds) => ipcRenderer.invoke('app:setBounds', bounds),
+  finishMove: () => ipcRenderer.invoke('app:finishMove'),
   getCenteredBounds: (size) => ipcRenderer.invoke('app:getCenteredBounds', size),
   getFocusBounds: () => ipcRenderer.invoke('app:getFocusBounds'),
+  revealWindow: () => ipcRenderer.invoke('app:revealWindow'),
+  getInitialState: () => ipcRenderer.invoke('app:getInitialState'),
   getBorderEnabled: () => ipcRenderer.invoke('app:getBorderEnabled'),
   getShadowEnabled: () => ipcRenderer.invoke('app:getShadowEnabled'),
   getMirrorEnabled: () => ipcRenderer.invoke('app:getMirrorEnabled'),

@@ -13,7 +13,9 @@ const fs = require('fs');
 const path = require('path');
 
 const MIN_SIZE = 100;
-const MAX_SIZE = 2000;
+// The real upper bound is the work area of the current display. This is only
+// a safety limit for values received over IPC, not a visual preset limit.
+const MAX_SIZE = 10_000;
 // The shadow extends down by blur radius plus Y offset. Leave extra transparent
 // room on every side so the native window never clips its soft edge.
 const SHADOW_INSET = 44;
@@ -22,24 +24,25 @@ const RECTANGLE_EDGE_MARGINS = { x: 24, y: 16 };
 const PROGRAMMATIC_LAYOUT_TOLERANCE = 16;
 const OVERLAY_REASSERT_DELAY_MS = 350;
 const EDGE_ANCHOR_TOLERANCE = 36;
-// The value is the long side in pixels. Each set maps the same visual labels
-// to a different footprint, rather than reusing square-window dimensions.
+// `scale` is the portion of the usable long side of the current display.
+// Every form has its own visual rhythm: a tall 9:16 camera needs more height
+// than a circle to feel equally useful, while 4:5 stays deliberately modest.
 const SIZE_PRESET_SETS = {
   square: [
-    { id: 'compact', label: 'Компактный', size: 250 },
-    { id: 'normal', label: 'Обычный', size: 450 },
-    { id: 'large', label: 'Большой', size: 600 },
-    { id: 'very-large', label: 'Очень большой', size: 700 },
+    { id: 'compact', label: 'Компактный', scale: 0.22 },
+    { id: 'normal', label: 'Обычный', scale: 0.34 },
+    { id: 'large', label: 'Большой', scale: 0.46 },
+    { id: 'very-large', label: 'Очень большой', scale: 0.58 },
   ],
   '4:5': [
-    { id: 'compact', label: 'Компактный', size: 300 },
-    { id: 'normal', label: 'Обычный', size: 400 },
-    { id: 'large', label: 'Большой', size: 550 },
+    { id: 'compact', label: 'Компактный', scale: 0.24 },
+    { id: 'normal', label: 'Обычный', scale: 0.35 },
+    { id: 'large', label: 'Большой', scale: 0.46 },
   ],
   '9:16': [
-    { id: 'compact', label: 'Компактный', size: 450 },
-    { id: 'normal', label: 'Обычный', size: 700 },
-    { id: 'large', label: 'Большой', size: 800 },
+    { id: 'compact', label: 'Компактный', scale: 0.38 },
+    { id: 'normal', label: 'Обычный', scale: 0.58 },
+    { id: 'large', label: 'Большой', scale: 0.78 },
   ],
 };
 const ASPECT_RATIOS = [
@@ -51,6 +54,12 @@ const UPDATE_REPOSITORY = { owner: 'leninblok', repo: 'floating-camera' };
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY.owner}/${UPDATE_REPOSITORY.repo}/releases/latest`;
 
 let mainWindow;
+// Read once before the renderer is created. Otherwise the renderer can ask
+// for the shape while these values still contain the defaults, briefly turn a
+// saved rectangle into a circle, and never receive a correction.
+let restoredWindowPosition = null;
+let windowPreparedForReveal = false;
+let windowRevealRequested = false;
 let borderEnabled = true;
 let shadowEnabled = true;
 let mirrorEnabled = false;
@@ -93,14 +102,36 @@ function sizePresetsForCurrentShape() {
   return SIZE_PRESET_SETS[aspectRatio] || SIZE_PRESET_SETS.square;
 }
 
-function activeSizePreset(size = null) {
+function maximumContentSizeForDisplay(display = null) {
+  const targetDisplay = display || (mainWindow && !mainWindow.isDestroyed()
+    ? displayForBounds(mainWindow.getBounds())
+    : screen.getPrimaryDisplay());
+  const workArea = targetDisplay.workArea;
+  const { x: marginX, y: marginY } = windowEdgeMargins();
+  const shadowSpace = shadowEnabled ? SHADOW_INSET * 2 : 0;
+  const availableWidth = Math.max(1, workArea.width - marginX * 2 - shadowSpace);
+  const availableHeight = Math.max(1, workArea.height - marginY * 2 - shadowSpace);
+  const ratio = shapeMode === 'circle'
+    ? 1
+    : selectedAspectRatio().width / selectedAspectRatio().height;
+  return Math.min(MAX_SIZE, Math.max(1, Math.min(availableHeight, availableWidth / ratio)));
+}
+
+function sizeForPreset(preset, display = null) {
+  const maximum = maximumContentSizeForDisplay(display);
+  const minimum = Math.min(MIN_SIZE, maximum);
+  return clampNumber(Math.round(maximum * Number(preset?.scale || 0)), minimum, maximum, minimum);
+}
+
+function activeSizePreset(size = null, display = null) {
   const presets = sizePresetsForCurrentShape();
   const selected = presets.find((preset) => preset.id === selectedSizePreset);
   if (selected) return selected;
 
-  const referenceSize = clampNumber(size, MIN_SIZE, MAX_SIZE, presets[0].size);
+  const maximum = maximumContentSizeForDisplay(display);
+  const referenceScale = clampNumber(size, 0, maximum, sizeForPreset(presets[0], display)) / maximum;
   const closest = presets.reduce((nearest, preset) => (
-    Math.abs(preset.size - referenceSize) < Math.abs(nearest.size - referenceSize) ? preset : nearest
+    Math.abs(preset.scale - referenceScale) < Math.abs(nearest.scale - referenceScale) ? preset : nearest
   ));
   selectedSizePreset = closest.id;
   return closest;
@@ -240,13 +271,15 @@ function loadLastState() {
     selectedSizePreset = hasStoredSizePreset ? data.sizePresetId : null;
     cameraDeviceId = typeof data.cameraDeviceId === 'string' ? data.cameraDeviceId : null;
 
-    const size = clampNumber(data.lastSize, MIN_SIZE, MAX_SIZE, 0);
-    if (!size || !Number.isFinite(data.lastX) || !Number.isFinite(data.lastY)) return null;
-    const preset = activeSizePreset(size);
+    if (!Number.isFinite(data.lastX) || !Number.isFinite(data.lastY)) return null;
+    // Migrate saved absolute sizes from versions before responsive presets by
+    // mapping them to the nearest current relative step on this display.
+    const legacySize = clampNumber(data.lastSize, MIN_SIZE, MAX_SIZE, 0);
+    const display = displayForBounds({ x: data.lastX, y: data.lastY, width: 1, height: 1 });
+    activeSizePreset(legacySize || null, display);
     return {
       x: Math.floor(data.lastX),
       y: Math.floor(data.lastY),
-      size: hasStoredSizePreset ? size : preset.size,
     };
   } catch (_) {
     return null;
@@ -255,9 +288,7 @@ function loadLastState() {
 
 function saveLastState(bounds) {
   try {
-    const side = largestSide(bounds);
     const data = {
-      lastSize: side,
       lastX: Math.round(bounds?.x || 0),
       lastY: Math.round(bounds?.y || 0),
       borderEnabled: Boolean(borderEnabled),
@@ -296,6 +327,24 @@ async function ensureCameraAccess() {
 
 function sendToRenderer(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
+}
+
+function syncRendererAppearance() {
+  sendToRenderer('camera:set-mirror', mirrorEnabled);
+  sendToRenderer('camera:set-border', borderEnabled);
+  sendToRenderer('camera:set-shadow', shadowEnabled);
+  sendToRenderer('camera:set-shape', { shapeMode, aspectRatio });
+}
+
+function revealCameraWindow() {
+  windowRevealRequested = true;
+  if (!windowPreparedForReveal || !mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
+  // The renderer asks for this only after it has either received a real video
+  // frame or prepared an actionable error. This prevents the startup flash of
+  // a black, default-shaped camera while preferences and media are loading.
+  mainWindow.showInactive();
+  enforceFloatingOverlay('first-frame-show', { bringToFront: true });
+  scheduleFloatingOverlayEnforcement('first-frame-show-settled');
 }
 
 function enforceFloatingOverlay(reason, { skipProcessTransform = false, bringToFront = false } = {}) {
@@ -434,19 +483,16 @@ function currentWindowSize() {
 }
 
 function focusSizeForCurrentShape() {
-  if (!mainWindow || mainWindow.isDestroyed()) return 750;
-  const workArea = displayForBounds(mainWindow.getBounds()).workArea;
-  const margins = windowEdgeMargins();
-  const shadowSpace = shadowEnabled ? SHADOW_INSET * 2 : 0;
-  const usableHeight = Math.max(MIN_SIZE, workArea.height - margins.y * 2 - shadowSpace);
-
-  if (shapeMode === 'rectangle' && aspectRatio === '9:16') {
-    return clampNumber(Math.min(usableHeight, 1200), MIN_SIZE, MAX_SIZE, 960);
-  }
-  if (shapeMode === 'rectangle' && aspectRatio === '4:5') {
-    return clampNumber(Math.min(Math.round(workArea.height * 0.78) - shadowSpace, 900), MIN_SIZE, MAX_SIZE, 760);
-  }
-  return clampNumber(Math.min(750, usableHeight), MIN_SIZE, MAX_SIZE, 750);
+  const display = mainWindow && !mainWindow.isDestroyed()
+    ? displayForBounds(mainWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const scale = shapeMode === 'rectangle' && aspectRatio === '9:16'
+    ? 0.92
+    : shapeMode === 'rectangle' && aspectRatio === '4:5'
+      ? 0.78
+      : 0.7;
+  const maximum = maximumContentSizeForDisplay(display);
+  return clampNumber(Math.round(maximum * scale), Math.min(MIN_SIZE, maximum), maximum, maximum);
 }
 
 function centeredBoundsForSize(size) {
@@ -460,11 +506,29 @@ function centeredBoundsForSize(size) {
   });
 }
 
+function responsiveBoundsForCurrentPreset(bounds) {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const current = bounds || mainWindow.getBounds();
+  const display = displayForBounds(current);
+  const preset = activeSizePreset(largestSide(current), display);
+  return boundsWithSizePreservingAnchor(current, sizeForPreset(preset, display));
+}
+
+function fitPresetToCurrentDisplay({ animate = false, save = false } = {}) {
+  const bounds = responsiveBoundsForCurrentPreset();
+  if (!bounds) return null;
+  setWindowBoundsProgrammatically(bounds, { animate, reason: 'responsive-display-size' });
+  if (save) saveLastState(bounds);
+  sendToRenderer('camera:size-changed', largestSide(bounds));
+  buildApplicationMenu();
+  return bounds;
+}
+
 function setMainWindowSize(preset) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const current = mainWindow.getBounds();
   selectedSizePreset = preset.id;
-  const bounds = boundsWithSizePreservingAnchor(current, preset.size);
+  const bounds = boundsWithSizePreservingAnchor(current, sizeForPreset(preset, displayForBounds(current)));
   setWindowBoundsProgrammatically(bounds, { animate: true, reason: 'size-preset' });
   focusEnabled = false;
   saveLastState(bounds);
@@ -516,8 +580,9 @@ function setShapeMode(mode) {
   focusEnabled = false;
   if (mainWindow && !mainWindow.isDestroyed()) {
     const current = mainWindow.getBounds();
-    const preset = activeSizePreset(largestSide(current));
-    const bounds = boundsWithSizePreservingAnchor(current, preset.size);
+    const display = displayForBounds(current);
+    const preset = activeSizePreset(largestSide(current), display);
+    const bounds = boundsWithSizePreservingAnchor(current, sizeForPreset(preset, display));
     // Change the mask first so its CSS transition begins together with the
     // macOS window animation below.
     sendToRenderer('camera:set-shape', { shapeMode, aspectRatio });
@@ -685,10 +750,13 @@ function buildApplicationMenu() {
   ]));
 }
 
-function createWindow(initialSize = 250, restoredBounds = null) {
+function createWindow() {
+  windowPreparedForReveal = false;
+  windowRevealRequested = false;
   mainWindow = new BrowserWindow({
-    width: initialSize,
-    height: initialSize,
+    // The actual responsive bounds are set while the hidden window prepares.
+    width: MIN_SIZE,
+    height: MIN_SIZE,
     frame: false,
     transparent: true,
     // This is a fixed-shape floating camera. Its only size changes come from
@@ -743,33 +811,41 @@ function createWindow(initialSize = 250, restoredBounds = null) {
     && details?.mediaType === 'video'
   ));
 
+  mainWindow.webContents.once('did-finish-load', () => {
+    // A second, explicit sync makes the persisted appearance authoritative
+    // even if Chromium completed its IPC request before it registered the
+    // renderer's initial settings.
+    syncRendererAppearance();
+  });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.once('ready-to-show', () => {
-    const state = loadLastState();
-    const bounds = restoredBounds
-      ? clampToVisibleDisplay(restoredBounds)
-      : state
-      ? clampToVisibleDisplay({ x: state.x, y: state.y, ...dimensionsForSize(state.size) })
-      : (() => {
-          const workArea = screen.getPrimaryDisplay().workArea;
-          const size = clampNumber(initialSize, MIN_SIZE, MAX_SIZE, 250);
-          const dimensions = dimensionsForSize(size);
-          return clampToVisibleDisplay({
-            x: workArea.x + workArea.width - dimensions.width,
-            y: workArea.y,
-            ...dimensions,
-          });
-        })();
+    const state = restoredWindowPosition;
+    const display = state
+      ? displayForBounds({ x: state.x, y: state.y, width: 1, height: 1 })
+      : screen.getPrimaryDisplay();
+    const preset = activeSizePreset(null, display);
+    const dimensions = dimensionsForSize(sizeForPreset(preset, display));
+    const workArea = display.workArea;
+    const bounds = state
+      ? clampToVisibleDisplay({ x: state.x, y: state.y, ...dimensions })
+      : clampToVisibleDisplay({
+          x: workArea.x + workArea.width - dimensions.width,
+          y: workArea.y,
+          ...dimensions,
+        });
     setWindowBoundsProgrammatically(bounds);
-    mainWindow.show();
-    // This must happen after `show()`: macOS may otherwise discard the
-    // collection behaviour while creating the transparent window surface.
-    enforceFloatingOverlay('initial-show', { bringToFront: true });
-    scheduleFloatingOverlayEnforcement('initial-show-settled');
+    syncRendererAppearance();
+    sendToRenderer('camera:size-changed', largestSide(bounds));
+    windowPreparedForReveal = true;
+    if (windowRevealRequested) revealCameraWindow();
   });
 
   mainWindow.on('close', () => saveLastState(mainWindow.getBounds()));
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    windowPreparedForReveal = false;
+    windowRevealRequested = false;
+  });
   mainWindow.on('blur', () => {
     // Entering another app's full-screen Space starts with the camera losing
     // key status. Reapply the native overlay flags shortly afterwards so the
@@ -788,9 +864,7 @@ function createWindow(initialSize = 250, restoredBounds = null) {
 
 function keepWindowVisible() {
   if (!mainWindow) return;
-  const current = mainWindow.getBounds();
-  const clamped = clampToVisibleDisplay(current);
-  setWindowBoundsProgrammatically(clamped);
+  fitPresetToCurrentDisplay();
 }
 
 app.whenReady().then(() => {
@@ -800,16 +874,18 @@ app.whenReady().then(() => {
   // Electron uses the same AppKit mode for windows visible above existing
   // full-screen Spaces; doing it once avoids later Space-role transitions.
   if (process.platform === 'darwin' && app.dock) app.dock.hide();
-  const state = loadLastState();
+  // This must precede BrowserWindow creation: the renderer reads these
+  // settings on its first frame.
+  restoredWindowPosition = loadLastState();
   buildApplicationMenu();
-  createWindow((state && state.size) || 250);
+  createWindow();
   void checkForUpdates();
   screen.on('display-metrics-changed', keepWindowVisible);
   screen.on('display-added', keepWindowVisible);
   screen.on('display-removed', keepWindowVisible);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow(250);
+      createWindow();
     }
   });
 }).catch((error) => {
@@ -827,10 +903,25 @@ handleTrusted('app:setBounds', (_event, bounds) => {
   const nextBounds = clampToVisibleDisplay(bounds);
   setWindowBoundsProgrammatically(nextBounds);
 });
+handleTrusted('app:finishMove', () => {
+  // During dragging we retain the current pixel size so the pointer does not
+  // jump at a display boundary. Once released, recalculate from the selected
+  // relative preset for the monitor where the camera now lives.
+  fitPresetToCurrentDisplay({ animate: true, save: true });
+});
 handleTrusted('app:getCenteredBounds', (_event, size) => {
   return centeredBoundsForSize(size);
 });
 handleTrusted('app:getFocusBounds', () => centeredBoundsForSize(focusSizeForCurrentShape()));
+handleTrusted('app:revealWindow', () => revealCameraWindow());
+handleTrusted('app:getInitialState', () => ({
+  borderEnabled,
+  shadowEnabled,
+  mirrorEnabled,
+  shapeMode,
+  aspectRatio,
+  cameraDeviceId,
+}));
 handleTrusted('app:getBorderEnabled', () => borderEnabled);
 handleTrusted('app:getShadowEnabled', () => shadowEnabled);
 handleTrusted('app:getMirrorEnabled', () => mirrorEnabled);

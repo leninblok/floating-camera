@@ -8,8 +8,11 @@
 
   const DURATION = 200;
   let enlarged = false;
+  let focusTransitioning = false;
   let prevBounds = null;
   let isDragging = false;
+  let activePointerId = null;
+  let dragRequestId = 0;
   let dragStartMouse = null;
   let dragStartWindow = null;
   let borderEnabled = true;
@@ -21,6 +24,16 @@
   let selectedDeviceId = null;
   let cameraStarting = false;
 
+  // The radius must always be tied to the actual short side of the rendered
+  // camera, not to its height. Native macOS window animations can temporarily
+  // give CSS container units an outdated value; an explicit pixel value keeps
+  // a tall 9:16 camera a soft rectangle instead of a capsule.
+  const CORNER_RADIUS_FRACTIONS = {
+    '1:1': 0.286,
+    '4:5': 0.22,
+    '9:16': 0.16,
+  };
+
   function isInteractiveTarget(target) {
     return Boolean(target?.closest?.('button, input, select, textarea, label, a'));
   }
@@ -29,6 +42,9 @@
     errText.textContent = message;
     privacyButton.hidden = !canOpenPrivacy;
     errBox.hidden = false;
+    // On failure there may be no camera frame to trigger the normal reveal,
+    // but the user still needs to see the recovery controls.
+    void window.electronAPI.revealWindow();
   }
 
   function hideError() {
@@ -42,6 +58,37 @@
     if (video) video.srcObject = null;
   }
 
+  function waitForFirstVideoFrame(timeoutMs = 8000) {
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      let timeoutId = null;
+      const finish = (error = null) => {
+        if (finished) return;
+        finished = true;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        video.removeEventListener('loadeddata', onReady);
+        video.removeEventListener('playing', onReady);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onReady = () => {
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) finish();
+      };
+
+      video.addEventListener('loadeddata', onReady);
+      video.addEventListener('playing', onReady);
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => finish());
+      }
+      timeoutId = window.setTimeout(() => {
+        finish(new Error('Камера не передала изображение.'));
+      }, timeoutMs);
+    });
+  }
+
   function applyBorderForSide(side) {
     if (!circle || !Number.isFinite(side)) return;
     circle.style.borderWidth = borderEnabled ? (side >= 350 ? '4px' : side >= 250 ? '3px' : '2px') : '0px';
@@ -53,18 +100,49 @@
 
   function applyShadow() {
     document.body.classList.toggle('shadow-enabled', shadowEnabled);
+    requestAnimationFrame(applyCornerRadius);
+  }
+
+  function applyCornerRadius() {
+    if (!circle) return;
+    if (shapeMode !== 'rectangle') {
+      circle.style.borderRadius = '50%';
+      return;
+    }
+    const bounds = circle.getBoundingClientRect();
+    const shortSide = Math.min(bounds.width, bounds.height);
+    if (!Number.isFinite(shortSide) || shortSide <= 0) return;
+    const fraction = CORNER_RADIUS_FRACTIONS[aspectRatio] || CORNER_RADIUS_FRACTIONS['4:5'];
+    // Use the property itself rather than a CSS custom-property fallback.
+    // That makes the intended rectangle win even if an older Chromium frame
+    // has cached the base 50% rule while macOS changes window bounds.
+    circle.style.borderRadius = `${Math.round(shortSide * fraction)}px`;
   }
 
   function applyShape() {
     circle.classList.toggle('rectangle', shapeMode === 'rectangle');
     circle.dataset.aspectRatio = aspectRatio;
+    requestAnimationFrame(applyCornerRadius);
   }
 
   function resetFocusForManualSize(side) {
     enlarged = false;
+    focusTransitioning = false;
     prevBounds = null;
     circle.classList.remove('locked');
     applyBorderForSide(side);
+  }
+
+  function cancelDrag() {
+    // `getBounds()` is asynchronous. A double-click can finish before the
+    // pointer-down handler receives its result, so invalidate any pending
+    // request as well as an active drag. Without this, that stale handler can
+    // start dragging after the camera has already entered focus mode.
+    dragRequestId += 1;
+    activePointerId = null;
+    isDragging = false;
+    dragStartMouse = null;
+    dragStartWindow = null;
   }
 
   async function refreshCameraDevices() {
@@ -98,6 +176,10 @@
       activeStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints });
       video.srcObject = activeStream;
       await video.play();
+      await waitForFirstVideoFrame();
+      // Do not reveal a temporary black default state. At this moment both
+      // the stored appearance and the first actual camera frame are ready.
+      await window.electronAPI.revealWindow();
       await refreshCameraDevices();
       hideError();
     } catch (error) {
@@ -140,25 +222,33 @@
   }
 
   async function setFocus(enabled) {
-    if (enabled === enlarged) return;
-    if (enabled) {
+    if (enabled === enlarged || focusTransitioning) return;
+    focusTransitioning = true;
+    // Block dragging from the very first frame of the transition, not only
+    // once its destination bounds have been calculated.
+    cancelDrag();
+    try {
+      if (enabled) {
+        const start = await window.electronAPI.getBounds();
+        const end = await window.electronAPI.getFocusBounds();
+        prevBounds = start;
+        circle.classList.add('locked');
+        await animateBounds(start, end);
+        enlarged = true;
+        applyBorderForSide(750);
+        await window.electronAPI.setFocusEnabled(true);
+        return;
+      }
       const start = await window.electronAPI.getBounds();
-      const end = await window.electronAPI.getFocusBounds();
-      prevBounds = start;
-      circle.classList.add('locked');
+      const end = prevBounds || await window.electronAPI.getCenteredBounds(250);
       await animateBounds(start, end);
-      enlarged = true;
-      applyBorderForSide(750);
-      await window.electronAPI.setFocusEnabled(true);
-      return;
+      circle.classList.remove('locked');
+      enlarged = false;
+      applyBorderForSide(Math.min(end.width, end.height));
+      await window.electronAPI.setFocusEnabled(false);
+    } finally {
+      focusTransitioning = false;
     }
-    const start = await window.electronAPI.getBounds();
-    const end = prevBounds || await window.electronAPI.getCenteredBounds(250);
-    await animateBounds(start, end);
-    circle.classList.remove('locked');
-    enlarged = false;
-    applyBorderForSide(Math.min(end.width, end.height));
-    await window.electronAPI.setFocusEnabled(false);
   }
 
   function toggleFocus() {
@@ -169,9 +259,19 @@
     if (!isInteractiveTarget(event.target)) toggleFocus().catch(() => {});
   });
   circle.addEventListener('pointerdown', async (event) => {
-    if (enlarged || event.button !== 0 || isInteractiveTarget(event.target)) return;
+    if (enlarged || focusTransitioning || event.button !== 0 || isInteractiveTarget(event.target)) return;
+    const requestId = ++dragRequestId;
+    activePointerId = event.pointerId;
     const bounds = await window.electronAPI.getBounds();
-    if (!bounds) return;
+    // Never begin a drag after the button has been released or after focus
+    // mode has started. This is especially important for the second click of
+    // a double-click, whose IPC response can arrive after `pointerup`.
+    if (!bounds
+      || requestId !== dragRequestId
+      || activePointerId !== event.pointerId
+      || enlarged
+      || focusTransitioning
+      || circle.classList.contains('locked')) return;
     isDragging = true;
     dragStartMouse = { x: event.screenX, y: event.screenY };
     dragStartWindow = bounds;
@@ -187,10 +287,11 @@
     });
   });
   const endDrag = (event) => {
-    isDragging = false;
-    dragStartMouse = null;
-    dragStartWindow = null;
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+    const didDrag = isDragging;
+    cancelDrag();
     try { circle.releasePointerCapture?.(event.pointerId); } catch (_) {}
+    if (didDrag) window.electronAPI.finishMove().catch(() => {});
   };
   circle.addEventListener('pointerup', endDrag);
   circle.addEventListener('pointercancel', endDrag);
@@ -228,13 +329,21 @@
     startCamera();
   });
 
+  const cornerResizeObserver = new ResizeObserver(() => applyCornerRadius());
+  cornerResizeObserver.observe(circle);
+
   (async () => {
-    borderEnabled = await window.electronAPI.getBorderEnabled();
-    shadowEnabled = await window.electronAPI.getShadowEnabled();
-    mirrorEnabled = await window.electronAPI.getMirrorEnabled();
-    ({ shapeMode, aspectRatio } = await window.electronAPI.getShape());
+    // Fetch everything in one IPC round trip while the hidden window warms
+    // up. It shortens startup and makes the first visible frame final rather
+    // than a sequence of circle/border/shadow corrections.
+    const initialState = await window.electronAPI.getInitialState();
+    borderEnabled = Boolean(initialState?.borderEnabled);
+    shadowEnabled = Boolean(initialState?.shadowEnabled);
+    mirrorEnabled = Boolean(initialState?.mirrorEnabled);
+    shapeMode = initialState?.shapeMode === 'rectangle' ? 'rectangle' : 'circle';
+    aspectRatio = typeof initialState?.aspectRatio === 'string' ? initialState.aspectRatio : '4:5';
     applyShape();
-    selectedDeviceId = await window.electronAPI.getCameraDeviceId();
+    selectedDeviceId = typeof initialState?.cameraDeviceId === 'string' ? initialState.cameraDeviceId : null;
     applyMirror();
     applyShadow();
     const bounds = await window.electronAPI.getBounds();
