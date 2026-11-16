@@ -97,7 +97,10 @@ test('quit shortcut appears in the app and context menus without a second camera
   assert.equal(appQuit.accelerator, 'CommandOrControl+Q');
   assert.equal(contextQuit.accelerator, 'CommandOrControl+Q');
   assert.equal(contextQuit.label, 'Закрыть');
+  assert.equal(contextQuit.role, undefined);
   assert.equal(contextQuit.icon, undefined);
+  contextQuit.click();
+  assert.equal(h.app.quitCalls, 1);
   assert.ok(cameraMenu.every((item) => item.role !== 'quit'));
   assert.ok(cameraMenu.some((item) => item.label === 'Выбрать камеру'));
   assert.ok(cameraMenu.some((item) => item.label === 'Фокус'));

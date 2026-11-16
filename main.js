@@ -858,7 +858,7 @@ function controlMenuItems(includeClose = false) {
   if (includeClose) {
     items.push(
       { type: 'separator' },
-      { role: 'quit', label: 'Закрыть', accelerator: 'CommandOrControl+Q' },
+      { label: 'Закрыть', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
     );
   }
   return items;
