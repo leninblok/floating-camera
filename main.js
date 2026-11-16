@@ -66,6 +66,7 @@ const UPDATE_REPOSITORY = { owner: 'leninblok', repo: 'floating-camera' };
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY.owner}/${UPDATE_REPOSITORY.repo}/releases/latest`;
 
 let mainWindow;
+let mouseEventsEnabled = null;
 // Read once before the renderer is created. Otherwise the renderer can ask
 // for the shape while these values still contain the defaults, briefly turn a
 // saved rectangle into a circle, and never receive a correction.
@@ -458,6 +459,14 @@ async function ensureCameraAccess() {
 
 function sendToRenderer(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
+}
+
+function setCameraMouseEventsEnabled(enabled) {
+  if (!mainWindow || mainWindow.isDestroyed()
+    || (process.platform !== 'darwin' && process.platform !== 'win32')
+    || mouseEventsEnabled === enabled) return;
+  mouseEventsEnabled = enabled;
+  mainWindow.setIgnoreMouseEvents(!enabled, enabled ? undefined : { forward: true });
 }
 
 function revealCameraWindow() {
@@ -947,8 +956,11 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  mouseEventsEnabled = null;
+  setCameraMouseEventsEnabled(false);
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('did-start-loading', () => setCameraMouseEventsEnabled(false));
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
   mainWindow.webContents.on('context-menu', (event, params) => {
     event.preventDefault();
@@ -977,6 +989,8 @@ function createWindow() {
     if (windowRevealRequested) revealCameraWindow();
   });
 
+  mainWindow.on('show', () => sendToRenderer('camera:sync-mouse-hit'));
+
   mainWindow.on('close', () => {
     if (!quittingAfterSave) saveLastState(mainWindow.getBounds());
   });
@@ -989,6 +1003,7 @@ function createWindow() {
     focusEnabled = false;
     focusRestoreBounds = null;
     mainWindow = null;
+    mouseEventsEnabled = null;
     windowPreparedForReveal = false;
     windowRevealRequested = false;
   });
@@ -1066,6 +1081,16 @@ handleTrusted('app:getBounds', () => {
   // Pointer-down interrupts a settling/resize animation at its current frame.
   cancelBoundsAnimation();
   return mainWindow ? mainWindow.getBounds() : null;
+});
+handleTrusted('app:getCursorInWindow', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const cursor = screen.getCursorScreenPoint();
+  const bounds = mainWindow.getBounds();
+  return { x: cursor.x - bounds.x, y: cursor.y - bounds.y };
+});
+ipcMain.on('app:setMouseEventsEnabled', (event, enabled) => {
+  if (!isTrustedSender(event) || typeof enabled !== 'boolean') return;
+  setCameraMouseEventsEnabled(enabled);
 });
 // Movement never changes size, normalizes the shape, rebuilds a menu, or
 // touches disk. The renderer coalesces pointer events to one send per frame.

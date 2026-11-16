@@ -26,6 +26,9 @@
   let appliedCaptureWidth = 0;
   let dragRevision = 0;
   let drag = null;
+  let mouseEventsEnabled = false;
+  let mouseHitRevision = 0;
+  let mouseHitQuery = 0;
   let moveFrame = null;
   let pendingPosition = null;
   let layoutId = null;
@@ -34,6 +37,40 @@
   function isInteractiveTarget(target) {
     return Boolean(target?.closest?.('button, input, select, textarea, label, a'));
   }
+
+  function setCameraMouseEventsEnabled(enabled) {
+    if (disposed || drag || mouseEventsEnabled === enabled) return;
+    mouseEventsEnabled = enabled;
+    api.setMouseEventsEnabled?.(enabled);
+  }
+
+  function updateMouseHit(x, y, eventTarget = null) {
+    if (disposed || drag) return;
+    const target = eventTarget?.nodeType === 1 ? eventTarget : document.elementFromPoint?.(x, y);
+    setCameraMouseEventsEnabled(Boolean(target && (target === circle || circle.contains(target))));
+  }
+
+  async function syncMouseHit() {
+    if (!api.getCursorInWindow) return;
+    const revision = mouseHitRevision;
+    const query = ++mouseHitQuery;
+    try {
+      const point = await api.getCursorInWindow();
+      if (query === mouseHitQuery && revision === mouseHitRevision
+        && point && Number.isFinite(point.x) && Number.isFinite(point.y)) updateMouseHit(point.x, point.y);
+    } catch (_) {
+      // The window may close while a cursor query is in flight.
+    }
+  }
+
+  window.addEventListener('mousemove', (event) => {
+    mouseHitRevision++;
+    updateMouseHit(event.clientX, event.clientY, event.target);
+  }, { passive: true });
+  window.addEventListener('mouseleave', () => {
+    mouseHitRevision++;
+    setCameraMouseEventsEnabled(false);
+  });
 
   function showError(message, canOpenPrivacy = false) {
     errText.textContent = message;
@@ -297,6 +334,8 @@
     const moved = drag.moved;
     flushMove();
     cancelDrag();
+    mouseHitRevision++;
+    updateMouseHit(event.clientX, event.clientY);
     if (moved) void api.finishMove().catch(() => {});
   };
   circle.addEventListener('pointerup', endDrag);
@@ -306,6 +345,7 @@
     const moved = drag?.moved;
     flushMove();
     cancelDrag();
+    void syncMouseHit();
     if (moved) void api.finishMove().catch(() => {});
   });
 
@@ -319,6 +359,7 @@
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     layoutFrame = null;
     layoutId = null;
+    void syncMouseHit();
     scheduleCaptureQuality();
   }
 
@@ -340,6 +381,7 @@
     layoutFrame = requestAnimationFrame(step);
   });
   api.onCancelLayout((id) => cancelLayout(id));
+  api.onSyncMouseHit?.(() => { void syncMouseHit(); });
 
   api.onSetMirror((enabled) => video.classList.toggle('mirror', enabled));
   api.onSetBorder((enabled) => { borderEnabled = enabled; updateGeometry(); });
@@ -350,6 +392,7 @@
     shapeMode = shape.shapeMode;
     aspectRatio = shape.aspectRatio;
     applyShape();
+    void syncMouseHit();
   });
   api.onSetFocus((enabled) => {
     cancelDrag();
@@ -396,6 +439,7 @@
     // Reveal the dark camera shell immediately, then show the live image as
     // soon as the device supplies a frame.
     await api.revealWindow();
+    void syncMouseHit();
     await startCamera();
   })().catch((error) => showError(`Ошибка запуска: ${error?.message || error}`));
 })();

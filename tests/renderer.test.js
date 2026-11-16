@@ -26,6 +26,7 @@ function element() {
   item.setPointerCapture = (id) => captures.add(id);
   item.hasPointerCapture = (id) => captures.has(id);
   item.releasePointerCapture = (id) => captures.delete(id);
+  item.contains = (target) => target === item;
   return item;
 }
 
@@ -57,6 +58,7 @@ function harness({ autoFrame = true, selectedDeviceId = null, boundsPromise = nu
   const requests = [];
   const selected = [];
   const layoutSteps = [];
+  const mouseEvents = [];
   let finishedMoves = 0;
   let reveals = 0;
   const api = {
@@ -64,6 +66,8 @@ function harness({ autoFrame = true, selectedDeviceId = null, boundsPromise = nu
     markStartup: () => {},
     getInitialState: async () => ({ borderEnabled: true, shadowEnabled: true, mirrorEnabled: false, shapeMode: 'circle', aspectRatio: '4:5', cameraDeviceId: selectedDeviceId }),
     getBounds: () => boundsPromise || Promise.resolve({ x: 100, y: 100, width: 338, height: 338 }),
+    getCursorInWindow: async () => null,
+    setMouseEventsEnabled: (enabled) => mouseEvents.push(enabled),
     ensureCameraAccess: async () => ({ granted: true }),
     revealWindow: async () => { reveals++; },
     syncCameraDevices: async () => {},
@@ -79,9 +83,11 @@ function harness({ autoFrame = true, selectedDeviceId = null, boundsPromise = nu
   media.enumerateDevices = async () => ['a', 'b', 'c'].map((deviceId) => ({ kind: 'videoinput', deviceId, label: deviceId }));
   media.getUserMedia = (constraints) => new Promise((resolve, reject) => requests.push({ constraints, resolve, reject }));
   const window = Object.assign(new Target(), { electronAPI: api, innerWidth: 338, innerHeight: 338, devicePixelRatio: 1 });
+  const body = element();
+  let hitTarget = body;
   let observerCallback;
   const context = vm.createContext({
-    window, document: { getElementById: (id) => elements[id], body: element() }, navigator: { mediaDevices: media },
+    window, document: { getElementById: (id) => elements[id], elementFromPoint: () => hitTarget, body }, navigator: { mediaDevices: media },
     AbortController, DOMException, HTMLMediaElement: { HAVE_CURRENT_DATA: 2 },
     ResizeObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} },
     setTimeout: (fn, ms) => { timers.set(++id, { fn, ms }); return id; },
@@ -91,7 +97,8 @@ function harness({ autoFrame = true, selectedDeviceId = null, boundsPromise = nu
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer.js'), 'utf8'), context);
   return {
-    elements, window, handlers, moves, requests, selected, rafs, frames, timers, media, deliverFrame, layoutSteps,
+    elements, body, window, handlers, moves, requests, selected, rafs, frames, timers, media, deliverFrame, layoutSteps, mouseEvents,
+    setHitTarget: (target) => { hitTarget = target; },
     finishedMoves: () => finishedMoves, reveals: () => reveals,
     resize: (width, height) => observerCallback([{ contentRect: { width, height } }]),
     flushQuality: async () => {
@@ -103,6 +110,27 @@ function harness({ autoFrame = true, selectedDeviceId = null, boundsPromise = nu
 }
 
 const pointer = (screenX, screenY) => ({ pointerId: 1, button: 0, screenX, screenY });
+
+test('camera accepts pointer input while its shadow passes through, including after a drag', async () => {
+  const h = harness();
+  h.setHitTarget(h.elements.circle);
+  await h.window.emit('mousemove', { clientX: 100, clientY: 100 });
+  await h.window.emit('mousemove', { clientX: 101, clientY: 100 });
+  assert.deepEqual(h.mouseEvents, [true]);
+
+  await h.elements.circle.emit('pointerdown', pointer(10, 20));
+  h.setHitTarget(h.body);
+  await h.window.emit('mousemove', { clientX: 10, clientY: 10 });
+  assert.deepEqual(h.mouseEvents, [true]);
+  await h.elements.circle.emit('pointerup', { ...pointer(10, 20), clientX: 10, clientY: 10 });
+  assert.deepEqual(h.mouseEvents, [true, false]);
+
+  h.setHitTarget(h.elements.circle);
+  await h.window.emit('mousemove', { clientX: 100, clientY: 100 });
+  assert.deepEqual(h.mouseEvents, [true, false, true]);
+  await h.window.emit('mouseleave');
+  assert.deepEqual(h.mouseEvents, [true, false, true, false]);
+});
 
 test('100 pointer events produce one move per frame; release flushes the final position', async () => {
   const h = harness();

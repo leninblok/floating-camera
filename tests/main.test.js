@@ -45,10 +45,12 @@ function harness({ reducedMotion = false, appDefaults = false } = {}) {
   const layoutCalls = [];
   const positionCalls = [];
   const messages = [];
+  const mouseHitCalls = [];
   const window = {
     isDestroyed: () => false,
     isVisible: () => true,
     setHasShadow: () => {},
+    setIgnoreMouseEvents: (ignore, options) => mouseHitCalls.push({ ignore, options }),
     invalidateShadow: () => {},
     getBounds: () => ({ ...bounds }),
     setBounds: (next, animate) => { bounds = { ...next }; layoutCalls.push({ next, animate }); },
@@ -84,12 +86,29 @@ function harness({ reducedMotion = false, appDefaults = false } = {}) {
   vm.runInContext('mainWindow = testWindow', context);
   const run = (code) => vm.runInContext(code, context);
   return {
-    run, advance, displays, app, writes, timers, layoutCalls, positionCalls, messages,
+    run, advance, displays, app, writes, timers, layoutCalls, positionCalls, messages, mouseHitCalls,
     bounds: () => ({ ...bounds }), menuBuilds: () => menuBuilds, menu: () => lastMenu,
     move: (position, sender = window.webContents) => ipc.emit('app:move', { sender }, position),
+    setMouseHit: (enabled, sender = window.webContents) => ipc.emit('app:setMouseEventsEnabled', { sender }, enabled),
     invoke: (name, ...args) => handlers.get(name)({ sender: window.webContents }, ...args),
   };
 }
+
+test('shadow input passes through and camera input is restored only on a real state change', { skip: !['darwin', 'win32'].includes(process.platform) }, () => {
+  const h = harness();
+  h.setMouseHit(false);
+  h.setMouseHit(false);
+  h.setMouseHit(true);
+  h.setMouseHit(true);
+  h.setMouseHit(false);
+  h.setMouseHit(true, {});
+  h.setMouseHit('true');
+  assert.equal(h.mouseHitCalls.length, 3);
+  assert.equal(h.mouseHitCalls[0].ignore, true);
+  assert.equal(h.mouseHitCalls[0].options.forward, true);
+  assert.equal(h.mouseHitCalls[1].ignore, false);
+  assert.equal(h.mouseHitCalls[2].ignore, true);
+});
 
 test('fresh launch uses a large 9:16 rectangle with shadow and no border', () => {
   const h = harness({ appDefaults: true });

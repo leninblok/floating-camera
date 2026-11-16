@@ -45,6 +45,12 @@ app.on('browser-window-created', (_event, win) => {
   let layouts = 0;
   let blockingNativeAnimations = 0;
   let visibleMs = null;
+  const mouseTransitions = [];
+  const setIgnoreMouseEvents = win.setIgnoreMouseEvents.bind(win);
+  win.setIgnoreMouseEvents = (ignore, options) => {
+    mouseTransitions.push({ ignore, options });
+    return setIgnoreMouseEvents(ignore, options);
+  };
   win.once('show', () => {
     visibleMs = Math.round(performance.now() - startedAt);
     void win.webContents.capturePage().then((image) => {
@@ -83,6 +89,31 @@ app.on('browser-window-created', (_event, win) => {
       const initial = await metrics();
       assert.equal(initial.ready, true);
       assert.equal(win.isVisible(), true);
+      assert.equal(mouseTransitions[0].ignore, true);
+      assert.equal(mouseTransitions[0].options.forward, true);
+      const hitTest = () => evaluate(`(() => {
+        const rect = document.getElementById('circle').getBoundingClientRect();
+        const inside = (x, y) => {
+          const target = document.elementFromPoint(x, y);
+          return Boolean(target?.closest?.('#circle'));
+        };
+        return {
+          center: inside(rect.x + rect.width / 2, rect.y + rect.height / 2),
+          corner: inside(rect.x + 2, rect.y + 2),
+        };
+      })()`);
+      const hit = await hitTest();
+      assert.equal(hit.center, true);
+      assert.equal(hit.corner, false);
+      const movePointer = async (x, y, ignored) => {
+        await evaluate(`(document.elementFromPoint(${Math.round(x)}, ${Math.round(y)}) || window)
+          .dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${Math.round(x)}, clientY: ${Math.round(y)} }))`);
+        for (let i = 0; i < 10 && mouseTransitions.at(-1)?.ignore !== ignored; i++) await delay(20);
+        assert.equal(mouseTransitions.at(-1).ignore, ignored);
+      };
+      await movePointer(10, 10, true);
+      await movePointer(initial.camera.x + initial.camera.width / 2, initial.camera.y + initial.camera.height / 2, false);
+      await movePointer(initial.camera.x + 2, initial.camera.y + 2, true);
       const initialBounds = win.getBounds();
       const workArea = screen.getPrimaryDisplay().workArea;
       const selected = (submenuLabel, label) => cameraMenu().items
@@ -183,6 +214,7 @@ app.on('browser-window-created', (_event, win) => {
       click('Форма', 'Круг');
       click('Размер', 'Обычный');
       await delay(380);
+      assert.equal((await hitTest()).corner, false);
       fs.writeFileSync(path.join(profile, 'circle.png'), (await win.webContents.capturePage()).toPNG());
       // Exercise the real move IPC and settling animation at an outer edge.
       click('Размер', 'Компактный');
