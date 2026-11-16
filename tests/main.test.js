@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 
-function harness({ reducedMotion = false } = {}) {
+function harness({ reducedMotion = false, appDefaults = false } = {}) {
   const displays = [
     { id: 1, workArea: { x: 0, y: 30, width: 1440, height: 870 } },
     { id: 2, workArea: { x: -1920, y: -200, width: 1920, height: 1080 } },
@@ -77,6 +77,9 @@ function harness({ reducedMotion = false } = {}) {
     clearTimeout: (id) => timers.delete(id),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8'), context);
+  // Existing geometry regressions use a saved square profile. The fresh
+  // launch profile is checked separately and in the Electron smoke test.
+  if (!appDefaults) vm.runInContext("shapeMode = 'circle'; aspectRatio = '4:5'; selectedSizePreset = 'compact'; borderEnabled = true", context);
   context.testWindow = window;
   vm.runInContext('mainWindow = testWindow', context);
   const run = (code) => vm.runInContext(code, context);
@@ -87,6 +90,17 @@ function harness({ reducedMotion = false } = {}) {
     invoke: (name, ...args) => handlers.get(name)({ sender: window.webContents }, ...args),
   };
 }
+
+test('fresh launch uses a large 9:16 rectangle with shadow and no border', () => {
+  const h = harness({ appDefaults: true });
+  assert.equal(h.run('shapeMode'), 'rectangle');
+  assert.equal(h.run('aspectRatio'), '9:16');
+  assert.equal(h.run('selectedSizePreset'), 'large');
+  assert.equal(h.run('shadowEnabled'), true);
+  assert.equal(h.run('borderEnabled'), false);
+  assert.equal(h.run('mirrorEnabled'), false);
+  assert.equal(h.run('focusEnabled'), false);
+});
 
 test('quit shortcut appears in the app and context menus without a second camera menu exit', () => {
   const h = harness();

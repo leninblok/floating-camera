@@ -10,9 +10,9 @@
 
   const CORNER_RADIUS_FRACTIONS = { '1:1': 0.286, '4:5': 0.22, '9:16': 0.16 };
   let enlarged = false;
-  let borderEnabled = true;
-  let shapeMode = 'circle';
-  let aspectRatio = '4:5';
+  let borderEnabled = false;
+  let shapeMode = 'rectangle';
+  let aspectRatio = '9:16';
   let contentWidth = 0;
   let contentHeight = 0;
   let activeStream = null;

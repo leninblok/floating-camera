@@ -83,10 +83,23 @@ app.on('browser-window-created', (_event, win) => {
       const initial = await metrics();
       assert.equal(initial.ready, true);
       assert.equal(win.isVisible(), true);
+      const initialBounds = win.getBounds();
+      const workArea = screen.getPrimaryDisplay().workArea;
+      const selected = (submenuLabel, label) => cameraMenu().items
+        .find((item) => item.label === submenuLabel).submenu.items
+        .find((item) => item.label === label).checked;
+      assert.equal(selected('Форма', 'Прямоугольник'), true);
+      assert.equal(selected('Соотношение сторон', '9:16'), true);
+      assert.equal(selected('Размер', 'Большой'), true);
+      assert.equal(selected('Оформление', 'Тень'), true);
+      assert.equal(selected('Оформление', 'Контур'), false);
+      assert.ok(Math.abs(initial.camera.width / initial.camera.height - 9 / 16) < 0.002);
+      assert.equal(initialBounds.x + initialBounds.width, workArea.x + workArea.width - 24);
+      assert.equal(initialBounds.y, workArea.y + 16);
       const startupMs = Math.round(performance.now() - startedAt);
       assert.ok(visibleMs < startupMs - 1000, `Shell waited for camera: shell=${visibleMs}ms, video=${startupMs}ms`);
-      // Exercise the live video layer at Full HD, not only the compact
-      // camera's low-resolution startup tier.
+      // Exercise the live video layer at Full HD regardless of the initial
+      // capture tier selected for the current display.
       const captureSettings = await evaluate(`(async () => {
         const track = document.getElementById('cam').srcObject.getVideoTracks()[0];
         await track.applyConstraints({ width: { exact: 1920 }, height: { exact: 1080 }, frameRate: { ideal: 30, max: 30 } });
@@ -123,8 +136,8 @@ app.on('browser-window-created', (_event, win) => {
         motionStats.push(stats);
         assert.ok(stats.distinctSizes >= 8 && stats.maxStep < 0.18 && !backwards, `Camera jumps: ${JSON.stringify(stats)}`);
       };
-      await recordMotion('resize-grow', () => click('Размер', 'Большой'));
       await recordMotion('resize-shrink', () => click('Размер', 'Компактный'));
+      await recordMotion('resize-grow', () => click('Размер', 'Большой'));
       await recordMotion('focus-enter', () => focus(true));
       await recordMotion('focus-leave', () => focus(false));
       const scenarios = [];
