@@ -16,14 +16,25 @@ const MIN_SIZE = 100;
 // The real upper bound is the work area of the current display. This is only
 // a safety limit for values received over IPC, not a visual preset limit.
 const MAX_SIZE = 10_000;
-// The shadow extends down by blur radius plus Y offset. Leave extra transparent
-// room on every side so the native window never clips its soft edge.
+// Reserve the same transparent gutter with and without a shadow. Appearance
+// must never resize the native window or shift the visible camera.
 const SHADOW_INSET = 44;
 const CIRCLE_EDGE_MARGINS = { x: 24, y: 48 };
 const RECTANGLE_EDGE_MARGINS = { x: 24, y: 16 };
 const PROGRAMMATIC_LAYOUT_TOLERANCE = 16;
 const OVERLAY_REASSERT_DELAY_MS = 350;
-const EDGE_ANCHOR_TOLERANCE = 36;
+const EDGE_ANCHOR_TOLERANCE = 1;
+const STARTUP_TRACE = process.env.KRUZHOK_PROFILE_STARTUP === '1';
+const startupStartedAt = process.hrtime.bigint();
+const startupPhases = new Set();
+
+function markStartup(phase) {
+  if (!STARTUP_TRACE || startupPhases.has(phase)) return;
+  startupPhases.add(phase);
+  const elapsedMs = Number(process.hrtime.bigint() - startupStartedAt) / 1e6;
+  console.info(`[startup] ${phase}: ${elapsedMs.toFixed(1)} ms`);
+}
+markStartup('main');
 // `scale` is the portion of the usable long side of the current display.
 // Every form has its own visual rhythm: a tall 9:16 camera needs more height
 // than a circle to feel equally useful, while 4:5 stays deliberately modest.
@@ -64,6 +75,7 @@ let borderEnabled = true;
 let shadowEnabled = true;
 let mirrorEnabled = false;
 let focusEnabled = false;
+let focusRestoreBounds = null;
 let shapeMode = 'circle';
 let aspectRatio = '4:5';
 let selectedSizePreset = 'compact';
@@ -72,6 +84,19 @@ let cameraDevices = [];
 let latestReleaseUrl = null;
 let lastProgrammaticBounds = null;
 let programmaticLayoutExpiresAt = 0;
+let programmaticLayoutStartBounds = null;
+let dragDisplays = null;
+let boundsAnimation = null;
+let layoutRevision = 0;
+let startupUpdateTimer = null;
+let shadowRefreshTimer = null;
+let overlayEnforcementTimer = null;
+let displayLayoutTimer = null;
+let settingsSaveTimer = null;
+let pendingSettings = null;
+let settingsWrite = Promise.resolve();
+let settingsWritePending = false;
+let quittingAfterSave = false;
 
 function compactBounds(bounds) {
   if (!bounds) return null;
@@ -108,7 +133,7 @@ function maximumContentSizeForDisplay(display = null) {
     : screen.getPrimaryDisplay());
   const workArea = targetDisplay.workArea;
   const { x: marginX, y: marginY } = windowEdgeMargins();
-  const shadowSpace = shadowEnabled ? SHADOW_INSET * 2 : 0;
+  const shadowSpace = SHADOW_INSET * 2;
   const availableWidth = Math.max(1, workArea.width - marginX * 2 - shadowSpace);
   const availableHeight = Math.max(1, workArea.height - marginY * 2 - shadowSpace);
   const ratio = shapeMode === 'circle'
@@ -138,8 +163,8 @@ function activeSizePreset(size = null, display = null) {
 }
 
 function dimensionsForSize(size) {
-  const maximumSide = clampNumber(size, MIN_SIZE, MAX_SIZE, 250);
-  const inset = shadowEnabled ? SHADOW_INSET * 2 : 0;
+  const maximumSide = clampNumber(size, 1, MAX_SIZE, 250);
+  const inset = SHADOW_INSET * 2;
   if (shapeMode === 'circle') return { width: maximumSide + inset, height: maximumSide + inset };
   const ratio = selectedAspectRatio().width / selectedAspectRatio().height;
   return ratio >= 1
@@ -148,8 +173,8 @@ function dimensionsForSize(size) {
 }
 
 function largestSide(bounds) {
-  const inset = shadowEnabled ? SHADOW_INSET * 2 : 0;
-  return clampNumber(Math.max(bounds?.width, bounds?.height) - inset, MIN_SIZE, MAX_SIZE, 250);
+  const inset = SHADOW_INSET * 2;
+  return clampNumber(Math.max(bounds?.width, bounds?.height) - inset, 1, MAX_SIZE, 250);
 }
 
 function normalizeBoundsForCurrentShape(bounds) {
@@ -210,27 +235,68 @@ function boundsWithSizePreservingAnchor(bounds, size) {
 }
 
 function isRecentProgrammaticLayout(bounds) {
-  return Date.now() < programmaticLayoutExpiresAt
-    && sameWindowSize(bounds, lastProgrammaticBounds);
+  if ((!boundsAnimation && Date.now() >= programmaticLayoutExpiresAt) || !lastProgrammaticBounds) return false;
+  // Accept the entire requested animation path, including intermediate sizes.
+  const start = programmaticLayoutStartBounds || lastProgrammaticBounds;
+  return ['width', 'height'].every((key) => (
+    bounds[key] >= Math.min(start[key], lastProgrammaticBounds[key]) - PROGRAMMATIC_LAYOUT_TOLERANCE
+    && bounds[key] <= Math.max(start[key], lastProgrammaticBounds[key]) + PROGRAMMATIC_LAYOUT_TOLERANCE
+  ));
 }
 
-function setWindowBoundsProgrammatically(bounds, { animate = false, reason = 'layout' } = {}) {
+function cancelBoundsAnimation() {
+  if (!boundsAnimation) return;
+  const id = boundsAnimation.id;
+  boundsAnimation = null;
+  sendToRenderer('camera:cancel-layout', id);
+}
+
+function setWindowBoundsProgrammatically(bounds, { animate = true, duration = 180 } = {}) {
   if (!mainWindow || mainWindow.isDestroyed() || !bounds) return;
-  // Electron delivers resize events asynchronously. Preserve the exact
-  // requested size, so a real external stretch is never hidden merely
-  // because it happened shortly after a camera drag or focus animation.
-  lastProgrammaticBounds = { ...bounds };
-  programmaticLayoutExpiresAt = Date.now() + (animate ? 1_250 : 750);
-  // Electron animates this natively on macOS. The renderer uses object-fit:
-  // cover, so the video is recropped while the bounds change rather than
-  // being stretched into the new shape.
-  mainWindow.setBounds(bounds, Boolean(animate && process.platform === 'darwin'));
+  const next = compactBounds(bounds);
+  const current = mainWindow.getBounds();
+  cancelBoundsAnimation();
+  if (Object.keys(next).every((key) => next[key] === current[key])) return;
+  const shouldAnimate = Boolean(animate && mainWindow.isVisible()
+    && !systemPreferences.getAnimationSettings().prefersReducedMotion);
+  programmaticLayoutStartBounds = current;
+  lastProgrammaticBounds = next;
+  programmaticLayoutExpiresAt = Date.now() + duration + 750;
+  if (!shouldAnimate) {
+    mainWindow.setBounds(next, false);
+    return;
+  }
+  // The renderer requests each step on its next presentation frame, with at
+  // most one request in flight. No independent timer can outrun painting.
+  boundsAnimation = { id: ++layoutRevision, from: current, target: next, duration, elapsed: 0, previousTime: null };
+  sendToRenderer('camera:animate-layout', boundsAnimation.id);
 }
 
-function sameWindowSize(first, second, tolerance = PROGRAMMATIC_LAYOUT_TOLERANCE) {
-  return Boolean(first && second
-    && Math.abs(first.width - second.width) <= tolerance
-    && Math.abs(first.height - second.height) <= tolerance);
+function stepBoundsAnimation(id, timestamp) {
+  const animation = boundsAnimation;
+  if (!animation || animation.id !== id || !Number.isFinite(timestamp) || timestamp < 0) return false;
+  if (animation.previousTime !== null && timestamp <= animation.previousTime) return true;
+  if (animation.previousTime !== null) {
+    // A late frame extends the transition slightly instead of teleporting
+    // straight to where a wall-clock timer thinks the window should be.
+    animation.elapsed += Math.min(20, timestamp - animation.previousTime);
+  }
+  animation.previousTime = timestamp;
+  const progress = Math.min(1, animation.elapsed / animation.duration);
+  // Ease in as well as out: a 60 Hz first frame must not jump almost 20% of
+  // the whole distance, especially when focus travels across the screen.
+  const eased = progress * progress * (3 - 2 * progress);
+  const frame = {};
+  for (const key of ['x', 'y', 'width', 'height']) {
+    frame[key] = Math.round(animation.from[key] + (animation.target[key] - animation.from[key]) * eased);
+  }
+  const current = mainWindow.getBounds();
+  if (Object.keys(frame).some((key) => frame[key] !== current[key])) mainWindow.setBounds(frame, false);
+  if (progress === 1) {
+    boundsAnimation = null;
+    refreshNativeShadow();
+  }
+  return progress < 1;
 }
 
 function clampToVisibleDisplay(bounds) {
@@ -242,19 +308,62 @@ function clampToVisibleDisplay(bounds) {
   const insetY = workArea.y + marginY;
   const insetWidth = Math.max(0, workArea.width - marginX * 2);
   const insetHeight = Math.max(0, workArea.height - marginY * 2);
-  const scale = Math.min(
-    1,
-    insetWidth > 0 ? insetWidth / normalized.width : 1,
-    insetHeight > 0 ? insetHeight / normalized.height : 1,
-  );
-  const width = Math.max(1, Math.round(normalized.width * scale));
-  const height = Math.max(1, Math.round(normalized.height * scale));
+  // Clamp the camera itself, then add the fixed shadow gutter. Scaling the
+  // entire window would distort the aspect ratio because the gutter is fixed.
+  const size = Math.min(largestSide(normalized), maximumContentSizeForDisplay(display));
+  const { width, height } = dimensionsForSize(size);
   let x = Number.isFinite(normalized.x) ? normalized.x : insetX;
   let y = Number.isFinite(normalized.y) ? normalized.y : insetY;
 
   x = Math.max(insetX, Math.min(x, insetX + insetWidth - width));
   y = Math.max(insetY, Math.min(y, insetY + insetHeight - height));
   return { x, y, width, height };
+}
+
+function constrainDragPosition(position, bounds) {
+  const displays = dragDisplays || (dragDisplays = screen.getAllDisplays());
+  const center = { x: position.x + bounds.width / 2, y: position.y + bounds.height / 2 };
+  // Project the proposed centre onto each work area to choose a display.
+  // This uses the cached screen layout, not a synchronous screen IPC call.
+  const distance = (display) => {
+    const area = display.workArea;
+    const dx = Math.max(area.x - center.x, 0, center.x - area.x - area.width);
+    const dy = Math.max(area.y - center.y, 0, center.y - area.y - area.height);
+    return dx * dx + dy * dy;
+  };
+  const display = displays.reduce((nearest, item) => distance(item) < distance(nearest) ? item : nearest);
+  const area = display.workArea;
+  const physical = display.bounds || area;
+  const margins = windowEdgeMargins();
+  const limit = {
+    left: area.x + margins.x,
+    right: area.x + area.width - margins.x - bounds.width,
+    top: area.y + margins.y,
+    bottom: area.y + area.height - margins.y - bounds.height,
+  };
+  for (const other of displays) {
+    if (other.id === display.id) continue;
+    const edge = other.bounds || other.workArea;
+    const inVerticalRange = center.y >= other.workArea.y && center.y <= other.workArea.y + other.workArea.height;
+    const inHorizontalRange = center.x >= other.workArea.x && center.x <= other.workArea.x + other.workArea.width;
+    // Unlock only actual shared screen edges, never a gap between monitors.
+    if (inVerticalRange && Math.abs(edge.x + edge.width - physical.x) <= 1) limit.left = -Infinity;
+    if (inVerticalRange && Math.abs(edge.x - physical.x - physical.width) <= 1) limit.right = Infinity;
+    if (inHorizontalRange && Math.abs(edge.y + edge.height - physical.y) <= 1) limit.top = -Infinity;
+    if (inHorizontalRange && Math.abs(edge.y - physical.y - physical.height) <= 1) limit.bottom = Infinity;
+  }
+  const rubberBand = (value, minimum, maximum) => {
+    if (maximum < minimum) maximum = minimum;
+    const clamped = Math.max(minimum, Math.min(value, maximum));
+    const delta = value - clamped;
+    // Up to 22 DIP of give: enough to feel responsive without losing the
+    // camera outside the display. Release eases back to the legal position.
+    return Math.round(clamped + Math.sign(delta) * 22 * (1 - Math.exp(-Math.abs(delta) / 65)));
+  };
+  return {
+    x: rubberBand(position.x, limit.left, limit.right),
+    y: rubberBand(position.y, limit.top, limit.bottom),
+  };
 }
 
 function loadLastState() {
@@ -286,30 +395,51 @@ function loadLastState() {
   }
 }
 
-function saveLastState(bounds) {
-  try {
-    const data = {
-      lastX: Math.round(bounds?.x || 0),
-      lastY: Math.round(bounds?.y || 0),
-      borderEnabled: Boolean(borderEnabled),
-      shadowEnabled: Boolean(shadowEnabled),
-      mirrorEnabled: Boolean(mirrorEnabled),
-      shapeMode,
-      aspectRatio,
-      sizePresetId: selectedSizePreset,
-      cameraDeviceId,
-    };
+function flushSettings() {
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = null;
+  if (!pendingSettings) return settingsWrite;
+  const data = pendingSettings;
+  pendingSettings = null;
+  settingsWritePending = true;
+  // Serialize atomic replacements so an older write cannot overwrite a newer
+  // setting. No disk I/O blocks pointer movement or window layout.
+  settingsWrite = settingsWrite.then(async () => {
     const settingsPath = getSettingsPath();
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(data), 'utf8');
-  } catch (_) {
+    const temporaryPath = `${settingsPath}.${process.pid}.tmp`;
+    await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(data), 'utf8');
+    await fs.promises.rename(temporaryPath, settingsPath);
+  }).catch(() => {
     // Persistence is optional; the camera remains usable if it fails.
-  }
+  });
+  const currentWrite = settingsWrite;
+  void currentWrite.then(() => {
+    if (settingsWrite === currentWrite) settingsWritePending = false;
+  });
+  return currentWrite;
+}
+
+function saveLastState(bounds) {
+  const position = focusEnabled && focusRestoreBounds ? focusRestoreBounds : boundsAnimation?.target || bounds;
+  pendingSettings = {
+    lastX: Math.round(position?.x || 0),
+    lastY: Math.round(position?.y || 0),
+    borderEnabled,
+    shadowEnabled,
+    mirrorEnabled,
+    shapeMode,
+    aspectRatio,
+    sizePresetId: selectedSizePreset,
+    cameraDeviceId,
+  };
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(flushSettings, 150);
 }
 
 function cameraPermissionMessage(status) {
   if (status === 'denied' || status === 'restricted') {
-    return 'Доступ к камере отключён. Разрешите Floating Camera в «Системные настройки → Конфиденциальность и безопасность → Камера», затем перезапустите приложение.';
+    return 'Доступ к камере отключён. Разрешите «Кружок» в «Системные настройки → Конфиденциальность и безопасность → Камера», затем перезапустите приложение.';
   }
   return 'Не удалось получить разрешение на камеру.';
 }
@@ -329,20 +459,15 @@ function sendToRenderer(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
 }
 
-function syncRendererAppearance() {
-  sendToRenderer('camera:set-mirror', mirrorEnabled);
-  sendToRenderer('camera:set-border', borderEnabled);
-  sendToRenderer('camera:set-shadow', shadowEnabled);
-  sendToRenderer('camera:set-shape', { shapeMode, aspectRatio });
-}
-
 function revealCameraWindow() {
   windowRevealRequested = true;
   if (!windowPreparedForReveal || !mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
-  // The renderer asks for this only after it has either received a real video
-  // frame or prepared an actionable error. This prevents the startup flash of
-  // a black, default-shaped camera while preferences and media are loading.
+  // Show the saved dark camera shell promptly; hardware starts independently.
   mainWindow.showInactive();
+  refreshNativeShadow();
+  markStartup('window-visible');
+  clearTimeout(startupUpdateTimer);
+  startupUpdateTimer = setTimeout(() => { void checkForUpdates(); }, 2000);
   enforceFloatingOverlay('first-frame-show', { bringToFront: true });
   scheduleFloatingOverlayEnforcement('first-frame-show-settled');
 }
@@ -372,7 +497,8 @@ function enforceFloatingOverlay(reason, { skipProcessTransform = false, bringToF
 }
 
 function scheduleFloatingOverlayEnforcement(reason, delay = OVERLAY_REASSERT_DELAY_MS) {
-  setTimeout(() => enforceFloatingOverlay(reason, {
+  clearTimeout(overlayEnforcementTimer);
+  overlayEnforcementTimer = setTimeout(() => enforceFloatingOverlay(reason, {
     skipProcessTransform: true,
     bringToFront: true,
   }), delay);
@@ -423,7 +549,7 @@ async function checkForUpdates() {
       redirect: 'error',
       headers: {
         Accept: 'application/vnd.github+json',
-        'User-Agent': `Floating-Camera/${app.getVersion()}`,
+        'User-Agent': `Kruzhok/${app.getVersion()}`,
         'X-GitHub-Api-Version': '2022-11-28',
       },
     });
@@ -487,10 +613,10 @@ function focusSizeForCurrentShape() {
     ? displayForBounds(mainWindow.getBounds())
     : screen.getPrimaryDisplay();
   const scale = shapeMode === 'rectangle' && aspectRatio === '9:16'
-    ? 0.92
+    ? 0.98
     : shapeMode === 'rectangle' && aspectRatio === '4:5'
-      ? 0.78
-      : 0.7;
+      ? 0.94
+      : 0.92;
   const maximum = maximumContentSizeForDisplay(display);
   return clampNumber(Math.round(maximum * scale), Math.min(MIN_SIZE, maximum), maximum, maximum);
 }
@@ -514,10 +640,10 @@ function responsiveBoundsForCurrentPreset(bounds) {
   return boundsWithSizePreservingAnchor(current, sizeForPreset(preset, display));
 }
 
-function fitPresetToCurrentDisplay({ animate = false, save = false } = {}) {
+function fitPresetToCurrentDisplay({ save = false, duration = 180 } = {}) {
   const bounds = responsiveBoundsForCurrentPreset();
   if (!bounds) return null;
-  setWindowBoundsProgrammatically(bounds, { animate, reason: 'responsive-display-size' });
+  setWindowBoundsProgrammatically(bounds, { duration });
   if (save) saveLastState(bounds);
   sendToRenderer('camera:size-changed', largestSide(bounds));
   buildApplicationMenu();
@@ -526,11 +652,13 @@ function fitPresetToCurrentDisplay({ animate = false, save = false } = {}) {
 
 function setMainWindowSize(preset) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const current = mainWindow.getBounds();
+  const current = focusRestoreBounds || boundsAnimation?.target || mainWindow.getBounds();
   selectedSizePreset = preset.id;
   const bounds = boundsWithSizePreservingAnchor(current, sizeForPreset(preset, displayForBounds(current)));
-  setWindowBoundsProgrammatically(bounds, { animate: true, reason: 'size-preset' });
+  setWindowBoundsProgrammatically(bounds);
   focusEnabled = false;
+  focusRestoreBounds = null;
+  sendToRenderer('camera:set-focus', false);
   saveLastState(bounds);
   sendToRenderer('camera:size-changed', largestSide(bounds));
   buildApplicationMenu();
@@ -550,43 +678,59 @@ function setBorderEnabled(enabled) {
   buildApplicationMenu();
 }
 
-function setShadowEnabled(enabled) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    shadowEnabled = Boolean(enabled);
-    buildApplicationMenu();
-    return;
-  }
+function refreshNativeShadow(delay = 0) {
+  if (process.platform !== 'darwin' || !shadowEnabled) return;
+  clearTimeout(shadowRefreshTimer);
+  shadowRefreshTimer = setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) mainWindow.invalidateShadow();
+  }, delay);
+}
 
-  const current = mainWindow.getBounds();
-  const contentSize = largestSide(current);
+function setShadowEnabled(enabled) {
   shadowEnabled = Boolean(enabled);
-  const bounds = boundsWithSizePreservingAnchor(current, contentSize);
-  // Start the visual transition before the native bounds animation.
+  // Shadow space is reserved even when hidden. Toggling it is paint-only:
+  // neither the native window nor the visible camera changes position/size.
+  if (mainWindow && !mainWindow.isDestroyed() && process.platform === 'darwin') {
+    mainWindow.setHasShadow(shadowEnabled);
+    if (shadowEnabled) refreshNativeShadow();
+  }
   sendToRenderer('camera:set-shadow', shadowEnabled);
-  setWindowBoundsProgrammatically(bounds, { animate: true, reason: 'shadow' });
-  saveLastState(bounds);
+  if (mainWindow && !mainWindow.isDestroyed()) saveLastState(mainWindow.getBounds());
   buildApplicationMenu();
 }
 
-function setFocusEnabled(enabled, notifyRenderer = true) {
-  focusEnabled = Boolean(enabled);
-  if (notifyRenderer) sendToRenderer('camera:set-focus', focusEnabled);
+function setFocusEnabled(enabled) {
+  if (!mainWindow || mainWindow.isDestroyed() || Boolean(enabled) === focusEnabled) return;
+  if (enabled) {
+    focusRestoreBounds = boundsAnimation?.target || mainWindow.getBounds();
+    focusEnabled = true;
+    setWindowBoundsProgrammatically(centeredBoundsForSize(focusSizeForCurrentShape()));
+  } else {
+    focusEnabled = false;
+    if (focusRestoreBounds) setWindowBoundsProgrammatically(clampToVisibleDisplay(focusRestoreBounds));
+    focusRestoreBounds = null;
+  }
+  sendToRenderer('camera:set-focus', focusEnabled);
   buildApplicationMenu();
 }
 
 function setShapeMode(mode) {
   if (mode !== 'circle' && mode !== 'rectangle') return;
-  shapeMode = mode;
+  // A new shape replaces the current transition. Compute it from the normal
+  // destination, never from an intermediate focus-animation frame.
+  const current = focusRestoreBounds || boundsAnimation?.target
+    || (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null);
+  if (focusEnabled) sendToRenderer('camera:set-focus', false);
   focusEnabled = false;
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    const current = mainWindow.getBounds();
+  focusRestoreBounds = null;
+  shapeMode = mode;
+  if (current) {
     const display = displayForBounds(current);
     const preset = activeSizePreset(largestSide(current), display);
     const bounds = boundsWithSizePreservingAnchor(current, sizeForPreset(preset, display));
-    // Change the mask first so its CSS transition begins together with the
-    // macOS window animation below.
     sendToRenderer('camera:set-shape', { shapeMode, aspectRatio });
-    setWindowBoundsProgrammatically(bounds, { animate: true, reason: 'shape' });
+    setWindowBoundsProgrammatically(bounds);
+    refreshNativeShadow(180);
     saveLastState(bounds);
     sendToRenderer('camera:size-changed', largestSide(bounds));
   }
@@ -597,7 +741,10 @@ function setAspectRatio(value) {
   if (!ASPECT_RATIOS.some((item) => item.value === value)) return;
   aspectRatio = value;
   if (shapeMode === 'rectangle') setShapeMode('rectangle');
-  else buildApplicationMenu();
+  else {
+    if (mainWindow && !mainWindow.isDestroyed()) saveLastState(mainWindow.getBounds());
+    buildApplicationMenu();
+  }
 }
 
 function setCameraDeviceId(deviceId, notifyRenderer = false) {
@@ -664,7 +811,7 @@ function sizeMenuItems() {
 
 function controlMenuItems(includeClose = false) {
   const items = [
-    { label: 'Источник', submenu: cameraMenuItems() },
+    { label: 'Выбрать камеру', submenu: cameraMenuItems() },
     { type: 'separator' },
   ];
 
@@ -700,7 +847,7 @@ function controlMenuItems(includeClose = false) {
       click: (item) => setMirrorEnabled(item.checked),
     },
     {
-      label: 'Режим фокуса',
+      label: 'Фокус',
       type: 'checkbox',
       checked: focusEnabled,
       click: (item) => setFocusEnabled(item.checked),
@@ -710,7 +857,7 @@ function controlMenuItems(includeClose = false) {
   if (includeClose) {
     items.push(
       { type: 'separator' },
-      { label: 'Закрыть камеру', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
+      { role: 'quit', label: 'Закрыть', accelerator: 'CommandOrControl+Q' },
     );
   }
   return items;
@@ -732,12 +879,12 @@ function buildApplicationMenu() {
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { role: 'quit', label: 'Завершить Floating Camera' },
+        { role: 'quit', label: 'Завершить Кружок', accelerator: 'CommandOrControl+Q' },
       ],
     },
     {
       label: 'Камера',
-      submenu: controlMenuItems(true),
+      submenu: controlMenuItems(),
     },
     {
       label: 'Обновления',
@@ -753,14 +900,25 @@ function buildApplicationMenu() {
 function createWindow() {
   windowPreparedForReveal = false;
   windowRevealRequested = false;
+  const state = restoredWindowPosition;
+  const display = state
+    ? displayForBounds({ x: state.x, y: state.y, width: 1, height: 1 })
+    : screen.getPrimaryDisplay();
+  const preset = activeSizePreset(null, display);
+  const dimensions = dimensionsForSize(sizeForPreset(preset, display));
+  const workArea = display.workArea;
+  const initialBounds = clampToVisibleDisplay({
+    x: state ? state.x : workArea.x + workArea.width - dimensions.width,
+    y: state ? state.y : workArea.y,
+    ...dimensions,
+  });
+  markStartup('window-create');
   mainWindow = new BrowserWindow({
-    // The actual responsive bounds are set while the hidden window prepares.
-    width: MIN_SIZE,
-    height: MIN_SIZE,
+    ...initialBounds,
     frame: false,
     transparent: true,
-    // This is a fixed-shape floating camera. Its only size changes come from
-    // the app's own controls, never from the standard macOS window controls.
+    // У окна фиксированная форма. Размер меняется только через элементы
+    // управления приложения, а не стандартными средствами macOS.
     resizable: false,
     maximizable: false,
     minimizable: false,
@@ -771,7 +929,7 @@ function createWindow() {
     fullscreenable: true,
     hiddenInMissionControl: true,
     alwaysOnTop: true,
-    hasShadow: false,
+    hasShadow: process.platform === 'darwin' && shadowEnabled,
     backgroundColor: '#00000000',
     // The camera's rounded shape is drawn by CSS. Disabling native rounded
     // corners makes Electron create a genuinely borderless AppKit window;
@@ -811,37 +969,23 @@ function createWindow() {
     && details?.mediaType === 'video'
   ));
 
-  mainWindow.webContents.once('did-finish-load', () => {
-    // A second, explicit sync makes the persisted appearance authoritative
-    // even if Chromium completed its IPC request before it registered the
-    // renderer's initial settings.
-    syncRendererAppearance();
-  });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.once('ready-to-show', () => {
-    const state = restoredWindowPosition;
-    const display = state
-      ? displayForBounds({ x: state.x, y: state.y, width: 1, height: 1 })
-      : screen.getPrimaryDisplay();
-    const preset = activeSizePreset(null, display);
-    const dimensions = dimensionsForSize(sizeForPreset(preset, display));
-    const workArea = display.workArea;
-    const bounds = state
-      ? clampToVisibleDisplay({ x: state.x, y: state.y, ...dimensions })
-      : clampToVisibleDisplay({
-          x: workArea.x + workArea.width - dimensions.width,
-          y: workArea.y,
-          ...dimensions,
-        });
-    setWindowBoundsProgrammatically(bounds);
-    syncRendererAppearance();
-    sendToRenderer('camera:size-changed', largestSide(bounds));
     windowPreparedForReveal = true;
     if (windowRevealRequested) revealCameraWindow();
   });
 
-  mainWindow.on('close', () => saveLastState(mainWindow.getBounds()));
+  mainWindow.on('close', () => {
+    if (!quittingAfterSave) saveLastState(mainWindow.getBounds());
+  });
   mainWindow.on('closed', () => {
+    cancelBoundsAnimation();
+    clearTimeout(startupUpdateTimer);
+    clearTimeout(shadowRefreshTimer);
+    clearTimeout(overlayEnforcementTimer);
+    clearTimeout(displayLayoutTimer);
+    focusEnabled = false;
+    focusRestoreBounds = null;
     mainWindow = null;
     windowPreparedForReveal = false;
     windowRevealRequested = false;
@@ -863,12 +1007,21 @@ function createWindow() {
 }
 
 function keepWindowVisible() {
-  if (!mainWindow) return;
-  fitPresetToCurrentDisplay();
+  dragDisplays = null;
+  clearTimeout(displayLayoutTimer);
+  displayLayoutTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (focusEnabled) {
+      setWindowBoundsProgrammatically(centeredBoundsForSize(focusSizeForCurrentShape()));
+    } else {
+      fitPresetToCurrentDisplay({ save: true });
+    }
+  }, 100);
 }
 
 app.whenReady().then(() => {
-  app.setName('Floating Camera');
+  markStartup('app-ready');
+  app.setName('Кружок');
   nativeTheme.themeSource = 'light';
   // Make the process an accessory application before creating the overlay.
   // Electron uses the same AppKit mode for windows visible above existing
@@ -879,41 +1032,58 @@ app.whenReady().then(() => {
   restoredWindowPosition = loadLastState();
   buildApplicationMenu();
   createWindow();
-  void checkForUpdates();
   screen.on('display-metrics-changed', keepWindowVisible);
   screen.on('display-added', keepWindowVisible);
   screen.on('display-removed', keepWindowVisible);
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    else if (!mainWindow.isVisible()) mainWindow.showInactive();
   });
 }).catch((error) => {
-  console.error('Floating Camera could not start:', error);
+  console.error('Кружок не удалось запустить:', error);
   app.exit(1);
+});
+
+app.on('before-quit', (event) => {
+  if (quittingAfterSave) return;
+  if (mainWindow && !mainWindow.isDestroyed()) saveLastState(mainWindow.getBounds());
+  if (!pendingSettings && !settingsWritePending) return;
+  event.preventDefault();
+  void flushSettings().finally(() => {
+    quittingAfterSave = true;
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-handleTrusted('app:getBounds', () => (mainWindow ? mainWindow.getBounds() : null));
-handleTrusted('app:setBounds', (_event, bounds) => {
-  if (!mainWindow || !bounds) return;
-  const nextBounds = clampToVisibleDisplay(bounds);
-  setWindowBoundsProgrammatically(nextBounds);
+handleTrusted('app:stepLayout', (_event, id, timestamp) => stepBoundsAnimation(id, timestamp));
+handleTrusted('app:getBounds', () => {
+  // Pointer-down interrupts a settling/resize animation at its current frame.
+  cancelBoundsAnimation();
+  return mainWindow ? mainWindow.getBounds() : null;
+});
+// Movement never changes size, normalizes the shape, rebuilds a menu, or
+// touches disk. The renderer coalesces pointer events to one send per frame.
+ipcMain.on('app:move', (event, position) => {
+  if (!isTrustedSender(event) || focusEnabled || !position
+    || !Number.isFinite(position.x) || !Number.isFinite(position.y)
+    || Math.abs(position.x) > 1_000_000 || Math.abs(position.y) > 1_000_000) return;
+  cancelBoundsAnimation();
+  const constrained = constrainDragPosition(position, mainWindow.getBounds());
+  mainWindow.setPosition(constrained.x, constrained.y, false);
 });
 handleTrusted('app:finishMove', () => {
-  // During dragging we retain the current pixel size so the pointer does not
-  // jump at a display boundary. Once released, recalculate from the selected
-  // relative preset for the monitor where the camera now lives.
-  fitPresetToCurrentDisplay({ animate: true, save: true });
+  if (!focusEnabled) fitPresetToCurrentDisplay({ save: true, duration: 160 });
 });
-handleTrusted('app:getCenteredBounds', (_event, size) => {
-  return centeredBoundsForSize(size);
+handleTrusted('app:toggleFocus', () => setFocusEnabled(!focusEnabled));
+handleTrusted('app:revealWindow', () => {
+  // The renderer has applied the saved appearance. Showing the shell does
+  // not depend on camera startup time.
+  revealCameraWindow();
 });
-handleTrusted('app:getFocusBounds', () => centeredBoundsForSize(focusSizeForCurrentShape()));
-handleTrusted('app:revealWindow', () => revealCameraWindow());
 handleTrusted('app:getInitialState', () => ({
   borderEnabled,
   shadowEnabled,
@@ -921,13 +1091,13 @@ handleTrusted('app:getInitialState', () => ({
   shapeMode,
   aspectRatio,
   cameraDeviceId,
+  nativeShadow: process.platform === 'darwin',
+  shadowInset: SHADOW_INSET,
 }));
-handleTrusted('app:getBorderEnabled', () => borderEnabled);
-handleTrusted('app:getShadowEnabled', () => shadowEnabled);
-handleTrusted('app:getMirrorEnabled', () => mirrorEnabled);
-handleTrusted('app:getShape', () => ({ shapeMode, aspectRatio }));
-handleTrusted('app:setFocusEnabled', (_event, enabled) => {
-  setFocusEnabled(enabled, false);
+ipcMain.on('app:startup-phase', (event, phase) => {
+  if (!isTrustedSender(event) || !['ui-ready', 'camera-access', 'camera-permission', 'camera-request', 'camera-stream', 'camera-frame'].includes(phase)) return;
+  markStartup(phase);
+  if (phase === 'camera-frame') refreshNativeShadow();
 });
 handleTrusted('app:ensureCameraAccess', ensureCameraAccess);
 handleTrusted('app:openCameraPrivacySettings', () => (
@@ -935,14 +1105,13 @@ handleTrusted('app:openCameraPrivacySettings', () => (
     ? shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Camera')
     : false
 ));
-handleTrusted('camera:getDeviceId', () => cameraDeviceId);
 handleTrusted('camera:setDeviceId', (_event, deviceId) => {
   setCameraDeviceId(deviceId);
 });
 handleTrusted('camera:syncDevices', (_event, devices) => {
   if (!Array.isArray(devices)) return;
   const uniqueIds = new Set();
-  cameraDevices = devices.reduce((result, device, index) => {
+  const nextDevices = devices.reduce((result, device, index) => {
     const id = typeof device?.id === 'string' ? device.id : '';
     if (!id || id.length > 1024 || uniqueIds.has(id)) return result;
     uniqueIds.add(id);
@@ -950,5 +1119,7 @@ handleTrusted('camera:syncDevices', (_event, devices) => {
     result.push({ id, label: (rawLabel || `Камера ${index + 1}`).slice(0, 256) });
     return result;
   }, []);
+  if (JSON.stringify(nextDevices) === JSON.stringify(cameraDevices)) return;
+  cameraDevices = nextDevices;
   buildApplicationMenu();
 });

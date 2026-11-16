@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 || ! -d "$1" ]]; then
-  echo "Usage: npm run verify:mac -- 'dist/mac/Floating Camera.app'" >&2
+  echo "Usage: npm run verify:mac -- 'dist/mac/Кружок.app'" >&2
   exit 64
 fi
 

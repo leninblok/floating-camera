@@ -1,38 +1,35 @@
 (() => {
+  const api = window.electronAPI;
   const video = document.getElementById('cam');
   const circle = document.getElementById('circle');
+  const cameraShell = document.getElementById('cameraShell');
   const errBox = document.getElementById('err');
   const errText = document.getElementById('errText');
   const retryButton = document.getElementById('retryButton');
   const privacyButton = document.getElementById('privacyButton');
 
-  const DURATION = 200;
+  const CORNER_RADIUS_FRACTIONS = { '1:1': 0.286, '4:5': 0.22, '9:16': 0.16 };
   let enlarged = false;
-  let focusTransitioning = false;
-  let prevBounds = null;
-  let isDragging = false;
-  let activePointerId = null;
-  let dragRequestId = 0;
-  let dragStartMouse = null;
-  let dragStartWindow = null;
   let borderEnabled = true;
-  let shadowEnabled = true;
-  let mirrorEnabled = false;
   let shapeMode = 'circle';
   let aspectRatio = '4:5';
+  let contentWidth = 0;
+  let contentHeight = 0;
   let activeStream = null;
   let selectedDeviceId = null;
+  let cameraRevision = 0;
   let cameraStarting = false;
-
-  // The radius must always be tied to the actual short side of the rendered
-  // camera, not to its height. Native macOS window animations can temporarily
-  // give CSS container units an outdated value; an explicit pixel value keeps
-  // a tall 9:16 camera a soft rectangle instead of a capsule.
-  const CORNER_RADIUS_FRACTIONS = {
-    '1:1': 0.286,
-    '4:5': 0.22,
-    '9:16': 0.16,
-  };
+  let disposed = false;
+  let frameAbort = null;
+  let qualityTimer = null;
+  let qualityApplying = false;
+  let appliedCaptureWidth = 0;
+  let dragRevision = 0;
+  let drag = null;
+  let moveFrame = null;
+  let pendingPosition = null;
+  let layoutId = null;
+  let layoutFrame = null;
 
   function isInteractiveTarget(target) {
     return Boolean(target?.closest?.('button, input, select, textarea, label, a'));
@@ -42,312 +39,363 @@
     errText.textContent = message;
     privacyButton.hidden = !canOpenPrivacy;
     errBox.hidden = false;
-    // On failure there may be no camera frame to trigger the normal reveal,
-    // but the user still needs to see the recovery controls.
-    void window.electronAPI.revealWindow();
+    document.body.classList.add('has-error');
+    void api.revealWindow();
   }
 
   function hideError() {
     errBox.hidden = true;
+    document.body.classList.remove('has-error');
     errText.textContent = '';
   }
 
   function stopCamera() {
+    frameAbort?.abort();
+    frameAbort = null;
+    clearTimeout(qualityTimer);
     if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
     activeStream = null;
-    if (video) video.srcObject = null;
+    video.srcObject = null;
+    document.body.classList.remove('has-video');
+    appliedCaptureWidth = 0;
   }
 
-  function waitForFirstVideoFrame(timeoutMs = 8000) {
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
-      return Promise.resolve();
-    }
+  function waitForFirstVideoFrame(signal, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
-      let finished = false;
+      let callbackId = null;
       let timeoutId = null;
-      const finish = (error = null) => {
+      let finished = false;
+      const finish = (error) => {
         if (finished) return;
         finished = true;
-        if (timeoutId) window.clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
+        if (callbackId !== null) video.cancelVideoFrameCallback?.(callbackId);
         video.removeEventListener('loadeddata', onReady);
         video.removeEventListener('playing', onReady);
+        signal.removeEventListener('abort', onAbort);
         if (error) reject(error);
         else resolve();
       };
       const onReady = () => {
         if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) finish();
       };
-
+      const onAbort = () => finish(new DOMException('Camera changed', 'AbortError'));
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+      // loadeddata and playing remain active even when rVFC is supported.
+      // A delayed compositor callback must not add seconds to camera startup.
       video.addEventListener('loadeddata', onReady);
       video.addEventListener('playing', onReady);
       if (typeof video.requestVideoFrameCallback === 'function') {
-        video.requestVideoFrameCallback(() => finish());
+        callbackId = video.requestVideoFrameCallback(() => finish());
       }
-      timeoutId = window.setTimeout(() => {
-        finish(new Error('Камера не передала изображение.'));
-      }, timeoutMs);
+      onReady();
+      if (!finished) timeoutId = setTimeout(() => finish(new Error('Камера не передала изображение.')), timeoutMs);
     });
   }
 
-  function applyBorderForSide(side) {
-    if (!circle || !Number.isFinite(side)) return;
-    circle.style.borderWidth = borderEnabled ? (side >= 350 ? '4px' : side >= 250 ? '3px' : '2px') : '0px';
-  }
-
-  function applyMirror() {
-    video.classList.toggle('mirror', mirrorEnabled);
-  }
-
-  function applyShadow() {
-    document.body.classList.toggle('shadow-enabled', shadowEnabled);
-    requestAnimationFrame(applyCornerRadius);
-  }
-
-  function applyCornerRadius() {
-    if (!circle) return;
-    if (shapeMode !== 'rectangle') {
-      circle.style.borderRadius = '50%';
-      return;
-    }
-    const bounds = circle.getBoundingClientRect();
-    const shortSide = Math.min(bounds.width, bounds.height);
-    if (!Number.isFinite(shortSide) || shortSide <= 0) return;
-    const fraction = CORNER_RADIUS_FRACTIONS[aspectRatio] || CORNER_RADIUS_FRACTIONS['4:5'];
-    // Use the property itself rather than a CSS custom-property fallback.
-    // That makes the intended rectangle win even if an older Chromium frame
-    // has cached the base 50% rule while macOS changes window bounds.
-    circle.style.borderRadius = `${Math.round(shortSide * fraction)}px`;
+  function updateGeometry(width = contentWidth, height = contentHeight) {
+    contentWidth = width;
+    contentHeight = height;
+    const shortSide = Math.min(width, height);
+    cameraShell.style.setProperty('--short-side', `${shortSide}px`);
+    circle.style.setProperty('--border-width', `${shortSide >= 350 ? 4 : shortSide >= 250 ? 3 : 2}px`);
+    document.body.classList.toggle('border-enabled', borderEnabled);
   }
 
   function applyShape() {
-    circle.classList.toggle('rectangle', shapeMode === 'rectangle');
-    circle.dataset.aspectRatio = aspectRatio;
-    requestAnimationFrame(applyCornerRadius);
+    const rectangle = shapeMode === 'rectangle';
+    cameraShell.classList.toggle('rectangle', rectangle);
+    // Only the roundness factor animates. The short side follows each actual
+    // native resize, so the mask cannot lag behind or turn into a capsule.
+    cameraShell.style.setProperty('--corner-fraction', rectangle ? (CORNER_RADIUS_FRACTIONS[aspectRatio] || 0.22) : 0.5);
+    cameraShell.style.setProperty('--corner-exponent', rectangle ? 1.5 : 1);
+    updateGeometry();
   }
 
-  function resetFocusForManualSize(side) {
-    enlarged = false;
-    focusTransitioning = false;
-    prevBounds = null;
-    circle.classList.remove('locked');
-    applyBorderForSide(side);
+  function captureConstraints() {
+    // Match capture to the displayed pixels (including cover cropping), with
+    // only three tiers so a small resize never renegotiates the camera.
+    const ratio = window.devicePixelRatio || 1;
+    const requiredWidth = Math.max(contentWidth, contentHeight * 16 / 9) * ratio;
+    const width = requiredWidth <= 640 ? 640 : requiredWidth <= 1280 ? 1280 : 1920;
+    return { width: { ideal: width }, height: { ideal: width * 9 / 16 }, frameRate: { ideal: 30, max: 30 } };
   }
 
-  function cancelDrag() {
-    // `getBounds()` is asynchronous. A double-click can finish before the
-    // pointer-down handler receives its result, so invalidate any pending
-    // request as well as an active drag. Without this, that stale handler can
-    // start dragging after the camera has already entered focus mode.
-    dragRequestId += 1;
-    activePointerId = null;
-    isDragging = false;
-    dragStartMouse = null;
-    dragStartWindow = null;
+  async function updateCaptureQuality() {
+    const track = activeStream?.getVideoTracks()[0];
+    if (!track || qualityApplying || disposed || layoutId !== null || drag) return;
+    const constraints = captureConstraints();
+    if (constraints.width.ideal === appliedCaptureWidth) return;
+    qualityApplying = true;
+    try {
+      await track.applyConstraints(constraints);
+      if (track === activeStream?.getVideoTracks()[0]) appliedCaptureWidth = constraints.width.ideal;
+    } catch (_) {
+      // An optional quality adjustment must never interrupt a working camera.
+    } finally {
+      qualityApplying = false;
+      // A size or source may have changed during applyConstraints.
+      if (activeStream && captureConstraints().width.ideal !== constraints.width.ideal) scheduleCaptureQuality();
+    }
+  }
+
+  function scheduleCaptureQuality() {
+    clearTimeout(qualityTimer);
+    if (layoutId !== null || drag) return;
+    // Reopening a camera format can briefly pause its driver. Keep that work
+    // out of resize/focus/drag and wait for a full quiet interval afterwards.
+    qualityTimer = setTimeout(() => { void updateCaptureQuality(); }, 800);
   }
 
   async function refreshCameraDevices() {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
+    if (!navigator.mediaDevices?.enumerateDevices || disposed) return;
+    const revision = cameraRevision;
     const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
-    const found = devices.some((device) => device.deviceId === selectedDeviceId);
-    if (selectedDeviceId && !found) {
-      selectedDeviceId = null;
-      await window.electronAPI.setCameraDeviceId(null);
-    }
-    await window.electronAPI.syncCameraDevices(devices.map((device, index) => ({
+    if (disposed || revision !== cameraRevision) return;
+    await api.syncCameraDevices(devices.map((device, index) => ({
       id: device.deviceId,
       label: device.label || `Камера ${index + 1}`,
     })));
+    if (disposed || revision !== cameraRevision) return;
+    if (selectedDeviceId && !devices.some((device) => device.deviceId === selectedDeviceId)) {
+      selectedDeviceId = null;
+      await api.setCameraDeviceId(null);
+      void startCamera();
+    }
   }
 
   async function startCamera() {
-    if (cameraStarting) return;
+    cameraRevision += 1;
+    stopCamera();
+    if (cameraStarting || disposed) return;
     cameraStarting = true;
-    hideError();
     try {
-      const access = await window.electronAPI.ensureCameraAccess();
-      if (!access?.granted) {
-        showError(access?.message || 'Нет доступа к камере.', true);
-        return;
+      // getUserMedia cannot be cancelled. Open one device at a time, discard
+      // stale results, and immediately process the user's latest selection.
+      while (!disposed) {
+        const revision = cameraRevision;
+        const deviceId = selectedDeviceId;
+        const isCurrent = () => !disposed && revision === cameraRevision;
+        hideError();
+        try {
+          api.markStartup('camera-access');
+          const access = await api.ensureCameraAccess();
+          api.markStartup('camera-permission');
+          if (!isCurrent()) continue;
+          if (!access?.granted) {
+            showError(access?.message || 'Нет доступа к камере.', true);
+            break;
+          }
+          const constraints = captureConstraints();
+          api.markStartup('camera-request');
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              ...constraints,
+              ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'user' } }),
+            },
+          });
+          if (!isCurrent()) {
+            stream.getTracks().forEach((track) => track.stop());
+            continue;
+          }
+          api.markStartup('camera-stream');
+          activeStream = stream;
+          appliedCaptureWidth = constraints.width.ideal;
+          video.srcObject = stream;
+          frameAbort = new AbortController();
+          // Attach readiness/abort listeners before play() can deliver a frame.
+          const firstFrame = waitForFirstVideoFrame(frameAbort.signal);
+          await Promise.all([video.play(), firstFrame]);
+          if (!isCurrent()) continue;
+          api.markStartup('camera-frame');
+          document.body.classList.add('has-video');
+          const track = stream.getVideoTracks()[0];
+          track?.addEventListener('ended', () => {
+            if (!isCurrent()) return;
+            stopCamera();
+            showError('Камера отключена. Подключите её и нажмите «Повторить».');
+          }, { once: true });
+          if (!isCurrent()) continue;
+          hideError();
+          scheduleCaptureQuality();
+          void refreshCameraDevices().catch(() => {});
+          break;
+        } catch (error) {
+          if (!isCurrent()) continue;
+          stopCamera();
+          // A saved USB camera may be absent on the next launch. Recover with
+          // the default camera instead of leaving an unusable exact deviceId.
+          if (deviceId && (error?.name === 'NotFoundError' || error?.name === 'OverconstrainedError')) {
+            selectedDeviceId = null;
+            await api.setCameraDeviceId(null);
+            if (isCurrent()) cameraRevision += 1;
+            continue;
+          }
+          const detail = error?.name === 'NotAllowedError'
+            ? 'Доступ к камере запрещён. Разрешите его в настройках системы и повторите попытку.'
+            : error?.name === 'NotFoundError'
+              ? 'Камера не найдена. Подключите камеру и нажмите «Повторить».'
+              : `Не удалось включить камеру: ${error?.message || 'неизвестная ошибка'}`;
+          showError(detail, error?.name === 'NotAllowedError');
+          break;
+        }
       }
-      stopCamera();
-      const videoConstraints = selectedDeviceId
-        ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
-        : { facingMode: { ideal: 'user' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
-      activeStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints });
-      video.srcObject = activeStream;
-      await video.play();
-      await waitForFirstVideoFrame();
-      // Do not reveal a temporary black default state. At this moment both
-      // the stored appearance and the first actual camera frame are ready.
-      await window.electronAPI.revealWindow();
-      await refreshCameraDevices();
-      hideError();
-    } catch (error) {
-      const detail = error?.name === 'NotAllowedError'
-        ? 'Доступ к камере запрещён. Разрешите его в настройках macOS и перезапустите приложение.'
-        : error?.name === 'NotFoundError'
-          ? 'Камера не найдена. Подключите камеру или выберите другую через меню «Источник».'
-          : `Не удалось включить камеру: ${error?.message || 'неизвестная ошибка'}`;
-      showError(detail, error?.name === 'NotAllowedError');
     } finally {
       cameraStarting = false;
     }
   }
 
-  function easeInOutCubic(value) {
-    return value < 0.5 ? 4 * value ** 3 : 1 - ((-2 * value + 2) ** 3) / 2;
+  function flushMove() {
+    if (moveFrame !== null) cancelAnimationFrame(moveFrame);
+    moveFrame = null;
+    if (!pendingPosition) return;
+    api.moveWindow(pendingPosition);
+    pendingPosition = null;
   }
 
-  function animateBounds(start, end, duration = DURATION) {
-    if (!start || !end) return Promise.resolve();
-    return new Promise((resolve) => {
-      const startedAt = performance.now();
-      const step = (now) => {
-        const progress = Math.min(1, (now - startedAt) / Math.max(1, duration));
-        const eased = easeInOutCubic(progress);
-        const width = Math.round(start.width + (end.width - start.width) * eased);
-        const height = Math.round(start.height + (end.height - start.height) * eased);
-        window.electronAPI.setBounds({
-          x: Math.round(start.x + (end.x - start.x) * eased),
-          y: Math.round(start.y + (end.y - start.y) * eased),
-          width,
-          height,
-        });
-        applyBorderForSide(Math.min(width, height));
-        if (progress < 1) requestAnimationFrame(step);
-        else resolve();
-      };
-      requestAnimationFrame(step);
-    });
-  }
-
-  async function setFocus(enabled) {
-    if (enabled === enlarged || focusTransitioning) return;
-    focusTransitioning = true;
-    // Block dragging from the very first frame of the transition, not only
-    // once its destination bounds have been calculated.
-    cancelDrag();
-    try {
-      if (enabled) {
-        const start = await window.electronAPI.getBounds();
-        const end = await window.electronAPI.getFocusBounds();
-        prevBounds = start;
-        circle.classList.add('locked');
-        await animateBounds(start, end);
-        enlarged = true;
-        applyBorderForSide(750);
-        await window.electronAPI.setFocusEnabled(true);
-        return;
-      }
-      const start = await window.electronAPI.getBounds();
-      const end = prevBounds || await window.electronAPI.getCenteredBounds(250);
-      await animateBounds(start, end);
-      circle.classList.remove('locked');
-      enlarged = false;
-      applyBorderForSide(Math.min(end.width, end.height));
-      await window.electronAPI.setFocusEnabled(false);
-    } finally {
-      focusTransitioning = false;
-    }
-  }
-
-  function toggleFocus() {
-    return setFocus(!enlarged);
+  function cancelDrag() {
+    dragRevision += 1;
+    if (moveFrame !== null) cancelAnimationFrame(moveFrame);
+    moveFrame = null;
+    pendingPosition = null;
+    const pointerId = drag?.pointerId;
+    drag = null;
+    if (pointerId !== undefined && circle.hasPointerCapture?.(pointerId)) circle.releasePointerCapture(pointerId);
+    scheduleCaptureQuality();
   }
 
   circle.addEventListener('dblclick', (event) => {
-    if (!isInteractiveTarget(event.target)) toggleFocus().catch(() => {});
+    if (isInteractiveTarget(event.target)) return;
+    cancelDrag();
+    void api.toggleFocus().catch(() => {});
   });
   circle.addEventListener('pointerdown', async (event) => {
-    if (enlarged || focusTransitioning || event.button !== 0 || isInteractiveTarget(event.target)) return;
-    const requestId = ++dragRequestId;
-    activePointerId = event.pointerId;
-    const bounds = await window.electronAPI.getBounds();
-    // Never begin a drag after the button has been released or after focus
-    // mode has started. This is especially important for the second click of
-    // a double-click, whose IPC response can arrive after `pointerup`.
-    if (!bounds
-      || requestId !== dragRequestId
-      || activePointerId !== event.pointerId
-      || enlarged
-      || focusTransitioning
-      || circle.classList.contains('locked')) return;
-    isDragging = true;
-    dragStartMouse = { x: event.screenX, y: event.screenY };
-    dragStartWindow = bounds;
+    if (enlarged || event.button !== 0 || isInteractiveTarget(event.target)) return;
+    cancelDrag();
+    const revision = dragRevision;
+    clearTimeout(qualityTimer);
+    drag = { pointerId: event.pointerId, mouseX: event.screenX, mouseY: event.screenY, bounds: null, moved: false };
+    // Capture immediately: pointerup must also arrive while getBounds is pending.
     circle.setPointerCapture?.(event.pointerId);
+    const bounds = await api.getBounds();
+    if (revision !== dragRevision || !drag || enlarged || !bounds) return;
+    drag.bounds = bounds;
   });
   circle.addEventListener('pointermove', (event) => {
-    if (!isDragging || !dragStartMouse || !dragStartWindow) return;
-    window.electronAPI.setBounds({
-      x: Math.round(dragStartWindow.x + event.screenX - dragStartMouse.x),
-      y: Math.round(dragStartWindow.y + event.screenY - dragStartMouse.y),
-      width: dragStartWindow.width,
-      height: dragStartWindow.height,
-    });
+    if (!drag?.bounds || event.pointerId !== drag.pointerId) return;
+    const dx = event.screenX - drag.mouseX;
+    const dy = event.screenY - drag.mouseY;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+    drag.moved = true;
+    pendingPosition = { x: Math.round(drag.bounds.x + dx), y: Math.round(drag.bounds.y + dy) };
+    if (moveFrame === null) moveFrame = requestAnimationFrame(flushMove);
   });
   const endDrag = (event) => {
-    if (activePointerId !== null && event.pointerId !== activePointerId) return;
-    const didDrag = isDragging;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const moved = drag.moved;
+    flushMove();
     cancelDrag();
-    try { circle.releasePointerCapture?.(event.pointerId); } catch (_) {}
-    if (didDrag) window.electronAPI.finishMove().catch(() => {});
+    if (moved) void api.finishMove().catch(() => {});
   };
   circle.addEventListener('pointerup', endDrag);
   circle.addEventListener('pointercancel', endDrag);
+  circle.addEventListener('lostpointercapture', endDrag);
+  window.addEventListener('blur', () => {
+    const moved = drag?.moved;
+    flushMove();
+    cancelDrag();
+    if (moved) void api.finishMove().catch(() => {});
+  });
 
-  retryButton.addEventListener('click', startCamera);
-  privacyButton.addEventListener('click', () => window.electronAPI.openCameraPrivacySettings());
-  window.addEventListener('beforeunload', stopCamera);
+  retryButton.addEventListener('click', () => { void startCamera(); });
+  privacyButton.addEventListener('click', () => { void api.openCameraPrivacySettings(); });
+  const onDeviceChange = () => { void refreshCameraDevices().catch(() => {}); };
+  navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange);
 
-  window.electronAPI.onSetMirror((enabled) => {
-    mirrorEnabled = enabled;
-    applyMirror();
+  function cancelLayout(id = layoutId) {
+    if (id !== layoutId) return;
+    if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    layoutFrame = null;
+    layoutId = null;
+    scheduleCaptureQuality();
+  }
+
+  api.onAnimateLayout((id) => {
+    cancelLayout();
+    layoutId = id;
+    clearTimeout(qualityTimer);
+    const step = async (timestamp) => {
+      layoutFrame = null;
+      try {
+        const more = await api.stepLayout(id, timestamp);
+        if (disposed || layoutId !== id) return;
+        if (more) layoutFrame = requestAnimationFrame(step);
+        else cancelLayout(id);
+      } catch (_) {
+        cancelLayout(id);
+      }
+    };
+    layoutFrame = requestAnimationFrame(step);
   });
-  window.electronAPI.onSetBorder(async (enabled) => {
-    borderEnabled = enabled;
-    const bounds = await window.electronAPI.getBounds();
-    if (bounds) applyBorderForSide(Math.min(bounds.width, bounds.height));
-  });
-  window.electronAPI.onSetShadow((enabled) => {
-    shadowEnabled = enabled;
-    applyShadow();
-  });
-  window.electronAPI.onSizeChanged((size) => {
-    if (Number.isFinite(size)) resetFocusForManualSize(size);
-  });
-  window.electronAPI.onSetShape((shape) => {
+  api.onCancelLayout((id) => cancelLayout(id));
+
+  api.onSetMirror((enabled) => video.classList.toggle('mirror', enabled));
+  api.onSetBorder((enabled) => { borderEnabled = enabled; updateGeometry(); });
+  api.onSetShadow((enabled) => document.body.classList.toggle('shadow-enabled', enabled));
+  api.onSizeChanged(() => cancelDrag());
+  api.onSetShape((shape) => {
+    cancelDrag();
     shapeMode = shape.shapeMode;
     aspectRatio = shape.aspectRatio;
     applyShape();
   });
-  window.electronAPI.onSetFocus((enabled) => {
-    setFocus(enabled).catch(() => {});
+  api.onSetFocus((enabled) => {
+    cancelDrag();
+    enlarged = enabled;
+    circle.classList.toggle('locked', enabled);
   });
-  window.electronAPI.onSetCameraDevice((deviceId) => {
+  api.onSetCameraDevice((deviceId) => {
     selectedDeviceId = deviceId;
-    startCamera();
+    void startCamera();
   });
 
-  const cornerResizeObserver = new ResizeObserver(() => applyCornerRadius());
-  cornerResizeObserver.observe(circle);
+  const resizeObserver = new ResizeObserver(([entry]) => {
+    // Use the dimensions already calculated by layout; no forced synchronous
+    // getBoundingClientRect() read after changing styles on every resize.
+    updateGeometry(entry.contentRect.width, entry.contentRect.height);
+    scheduleCaptureQuality();
+  });
+  resizeObserver.observe(cameraShell);
+  window.addEventListener('beforeunload', () => {
+    disposed = true;
+    cameraRevision += 1;
+    cancelLayout();
+    cancelDrag();
+    stopCamera();
+    resizeObserver.disconnect();
+    navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange);
+  });
 
   (async () => {
-    // Fetch everything in one IPC round trip while the hidden window warms
-    // up. It shortens startup and makes the first visible frame final rather
-    // than a sequence of circle/border/shadow corrections.
-    const initialState = await window.electronAPI.getInitialState();
-    borderEnabled = Boolean(initialState?.borderEnabled);
-    shadowEnabled = Boolean(initialState?.shadowEnabled);
-    mirrorEnabled = Boolean(initialState?.mirrorEnabled);
-    shapeMode = initialState?.shapeMode === 'rectangle' ? 'rectangle' : 'circle';
-    aspectRatio = typeof initialState?.aspectRatio === 'string' ? initialState.aspectRatio : '4:5';
+    const initialState = await api.getInitialState();
+    if (disposed) return;
+    borderEnabled = Boolean(initialState.borderEnabled);
+    shapeMode = initialState.shapeMode;
+    aspectRatio = initialState.aspectRatio;
+    selectedDeviceId = initialState.cameraDeviceId;
+    const gutter = (initialState.shadowInset ?? 44) * 2;
+    contentWidth = Math.max(1, window.innerWidth - gutter);
+    contentHeight = Math.max(1, window.innerHeight - gutter);
     applyShape();
-    selectedDeviceId = typeof initialState?.cameraDeviceId === 'string' ? initialState.cameraDeviceId : null;
-    applyMirror();
-    applyShadow();
-    const bounds = await window.electronAPI.getBounds();
-    if (bounds) applyBorderForSide(Math.min(bounds.width, bounds.height));
+    video.classList.toggle('mirror', initialState.mirrorEnabled);
+    document.body.classList.toggle('native-shadow', initialState.nativeShadow);
+    document.body.classList.toggle('shadow-enabled', initialState.shadowEnabled);
+    api.markStartup('ui-ready');
+    // Reveal the dark camera shell immediately, then show the live image as
+    // soon as the device supplies a frame.
+    await api.revealWindow();
     await startCamera();
   })().catch((error) => showError(`Ошибка запуска: ${error?.message || error}`));
 })();

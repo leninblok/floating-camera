@@ -1,7 +1,7 @@
 {
-  "name": "floating-camera",
+  "name": "kruzhok",
   "version": "1.1.0",
-  "description": "Always-on-top circular camera window for macOS",
+  "description": "Плавающее окно камеры поверх приложений",
   "main": "main.js",
   "repository": {
     "type": "git",
@@ -14,15 +14,27 @@
   },
   "scripts": {
     "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/prepare-macos-package.js && node --check scripts/require-macos-release-credentials.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/prepare-installers.js && node --check scripts/prepare-macos-package.js && node --check scripts/require-macos-release-credentials.js",
+    "prepare:installers": "node scripts/prepare-installers.js",
     "dist": "electron-builder --mac",
     "dist:mac:arm64": "electron-builder --mac --arm64",
     "dist:mac:x64": "electron-builder --mac --x64",
-    "verify:mac": "bash scripts/verify-macos-release.sh"
+    "dist:mac:unsigned": "ALLOW_UNSIGNED_MACOS_RELEASE=1 electron-builder --mac --arm64 --config.mac.forceCodeSigning=false --config.mac.notarize=false",
+    "dist:mac:unsigned:x64": "ALLOW_UNSIGNED_MACOS_RELEASE=1 electron-builder --mac --x64 --config.mac.forceCodeSigning=false --config.mac.notarize=false",
+    "dist:win": "electron-builder --win nsis --x64",
+    "predist": "npm run prepare:installers",
+    "predist:mac:arm64": "npm run prepare:installers",
+    "predist:mac:x64": "npm run prepare:installers",
+    "predist:mac:unsigned": "npm run prepare:installers",
+    "predist:mac:unsigned:x64": "npm run prepare:installers",
+    "predist:win": "npm run prepare:installers",
+    "verify:mac": "bash scripts/verify-macos-release.sh",
+    "test": "node --test tests/*.test.js",
+    "test:smoke": "env -u ELECTRON_RUN_AS_NODE electron tests/electron-smoke.js"
   },
   "build": {
-    "appId": "io.github.leninblok.floatingcamera",
-    "productName": "Floating Camera",
+    "appId": "io.github.leninblok.kruzhok",
+    "productName": "Кружок",
     "asar": true,
     "beforePack": "scripts/prepare-macos-package.js",
     "files": [
@@ -35,6 +47,7 @@
     "mac": {
       "category": "public.app-category.utilities",
       "minimumSystemVersion": "12.0.0",
+      "artifactName": "installers/mac-${arch}/${productName}-${version}.${ext}",
       "target": [
         "dmg",
         "zip"
@@ -45,9 +58,26 @@
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "notarize": true,
       "extendInfo": {
-        "NSCameraUsageDescription": "Floating Camera показывает изображение с выбранной камеры в плавающем окне.",
+        "NSCameraUsageDescription": "Кружок показывает изображение с выбранной камеры поверх приложений.",
         "NSCameraUseContinuityCameraDeviceType": true
       }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "installers/windows-${arch}/${productName}-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false
     }
   },
   "devDependencies": {
