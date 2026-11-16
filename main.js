@@ -11,6 +11,7 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const APP_ICON_PATH = path.join(__dirname, 'build', 'icon.png');
 
 const MIN_SIZE = 100;
 // The real upper bound is the work area of the current display. This is only
@@ -915,6 +916,7 @@ function createWindow() {
   markStartup('window-create');
   mainWindow = new BrowserWindow({
     ...initialBounds,
+    ...(process.platform === 'darwin' ? {} : { icon: APP_ICON_PATH }),
     frame: false,
     transparent: true,
     // У окна фиксированная форма. Размер меняется только через элементы

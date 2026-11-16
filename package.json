@@ -42,9 +42,11 @@
       "preload.js",
       "renderer.js",
       "index.html",
+      "build/icon.png",
       "package.json"
     ],
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.utilities",
       "minimumSystemVersion": "12.0.0",
       "artifactName": "installers/mac-${arch}/${productName}-${version}.${ext}",
@@ -63,6 +65,7 @@
       }
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
