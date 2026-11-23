@@ -53,7 +53,7 @@ jobs:
         run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
       - name: Exercise packaged app with an artificial camera (macOS)
         if: runner.os == 'macOS'
-        run: node scripts/smoke-tauri.js src-tauri/target/universal-apple-darwin/release/bundle/macos/Кружок.app/Contents/MacOS/kruzhok
+        run: bash scripts/smoke-macos.sh src-tauri/target/universal-apple-darwin/release/bundle/dmg/Кружок_1.2.0_universal.dmg
       - name: Exercise packaged app with an artificial camera (Windows)
         if: runner.os == 'Windows'
         run: node scripts/smoke-tauri.js src-tauri/target/x86_64-pc-windows-msvc/release/kruzhok.exe
