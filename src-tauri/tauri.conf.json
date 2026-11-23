@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-src 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost https://api.github.com; base-uri 'none'; form-action 'none'; frame-src 'none'"
     }
   },
   "bundle": {

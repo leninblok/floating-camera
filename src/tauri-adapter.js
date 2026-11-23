@@ -6,7 +6,7 @@
   let engine, configuration, monitors = [], bounds = {x:0,y:0,width:320,height:500};
   let visible = false, disposed = false, cursor = {x:-1,y:-1}, cameraDevices = [];
   let pendingBounds = null, writing = null, persistTimer = null, menuTimer = null, smokeStarted = false;
-  let lastSaved = {};
+  let lastSaved = {}, updateStatus = "";
   const emit = (channel,...args) => handlers.get(channel)?.(...args);
   function writeBounds(value) {
     bounds = {...value}; pendingBounds = {...value};
@@ -27,7 +27,7 @@
       return distance(display)<distance(nearest)?display:nearest;
     });
   }
-  function state(){return {...engine.getState(),cameraDevices};}
+  function state(){return {...engine.getState(),cameraDevices,updateStatus};}
   async function save(){
     if(!engine||disposed)return;
     const s=state();
@@ -64,7 +64,12 @@
   const boot=(async()=>{
     configuration=await invoke('bootstrap');monitors=configuration.monitors;lastSaved=configuration.settings;
     if(!monitors.length)throw new Error('No displays available');
-    if(configuration.smoke)fakeCamera();
+    if(configuration.smoke){
+      fakeCamera();
+      setTimeout(()=>{
+        if(!smokeStarted)void invoke('smoke_report',{report:{ok:false,error:'Camera startup did not finish',detail:document.getElementById('errText')?.textContent,secureContext:window.isSecureContext}});
+      },20000);
+    }
     engine=window.createKruzhokNative({
       settings:configuration.settings,
       window:{isDestroyed:()=>disposed,isVisible:()=>visible,getBounds:()=>({...bounds}),setBounds:writeBounds,
@@ -84,13 +89,36 @@
       else if(command==='border')engine.setBorder(!s.borderEnabled);
       else if(command==='shadow')setShadow(!s.shadowEnabled);
       else if(command==='focus')engine.toggleFocus();
+      else if(command==='check-updates')void checkUpdates();
     });
     writeBounds(engine.initialBounds());await flush();
+    if(configuration.platform==='macos')await invoke('set_shadow',{enabled:engine.getState().shadowEnabled});
     await invoke('sync_menu',{state:state()});
     const privacy=document.getElementById('privacyButton');
     if(privacy)privacy.textContent=configuration.platform==='macos'?'Настройки macOS':'Доступ к камере';
+    if(!configuration.smoke)setTimeout(()=>void checkUpdates(),2000);
     return engine.getState();
   })();
+  boot.catch(error=>{
+    console.error('Native initialization failed:',error);
+    if(configuration?.smoke)void invoke('smoke_report',{report:{ok:false,error:String(error),phase:'bootstrap'}});
+  });
+  async function checkUpdates(){
+    updateStatus='Проверяем обновления…';changed();
+    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),8000);
+    try{
+      const response=await fetch('https://api.github.com/repos/leninblok/floating-camera/releases/latest',{signal:abort.signal,redirect:'error',headers:{Accept:'application/vnd.github+json'}});
+      if(!response.ok)throw new Error('Release unavailable');
+      const release=await response.json();
+      const version=/^v?(\d+)\.(\d+)\.(\d+)$/.exec(release.tag_name||'');
+      const current=configuration.version.split('.').map(Number);
+      const parts=version?.slice(1).map(Number);
+      if(!parts||!Array.isArray(release.assets)||!release.assets.some(a=>configuration.platform==='macos'?/\.dmg$/.test(a.name):/\.exe$/.test(a.name)))throw new Error('Installer unavailable');
+      let newer=false;for(let i=0;i<3;i++){if(parts[i]!==current[i]){newer=parts[i]>current[i];break;}}
+      updateStatus=newer?`Доступна версия ${parts.join('.')}`:`Установлена последняя версия (${configuration.version})`;
+    }catch(_){updateStatus='Не удалось проверить обновления';}
+    finally{clearTimeout(timer);changed();}
+  }
   async function setShadow(enabled){engine.setShadow(enabled);if(configuration.platform==='macos')await invoke('set_shadow',{enabled});}
   const api=window.electronAPI={
     markStartup(phase){
@@ -135,6 +163,7 @@
     };
     try{
       assert(document.body.classList.contains('has-video'),'first camera frame');
+      if(!CSS.supports('corner-shape','superellipse(1.5)'))assert(document.body.classList.contains('shape-fallback')&&document.querySelector('#camera-shape-clip path')?.getAttribute('d')?.length>100,'WebKit superellipse fallback');
       assert(state().shapeMode==='rectangle'&&state().aspectRatio==='9:16','fresh app defaults');
       for(const shape of ['circle','rectangle']){
         engine.setShape(shape);
@@ -145,6 +174,10 @@
             const actual=await invoke('native_status');
             assert(Math.abs(actual.bounds.width-bounds.width)<=1&&Math.abs(actual.bounds.height-bounds.height)<=1,`native bounds ${shape} ${aspect} ${preset.id}`);
             assert(Math.abs(document.getElementById('cameraShell').clientWidth-(bounds.width-88))<=1,'webview geometry');
+            const camera=document.getElementById('circle'),w=bounds.width-88,h=bounds.height-88;
+            const middle=document.elementFromPoint(44+w/2,44+h/2),corner=document.elementFromPoint(44.2,44.2);
+            assert(middle===camera||camera.contains(middle),'camera hit target');
+            assert(corner!==camera&&!camera.contains(corner),'transparent corner click-through');
           }
         }
       }

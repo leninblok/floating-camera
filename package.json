@@ -16,7 +16,10 @@
     "check": "node --check renderer.js && node --check src/tauri-adapter.js && node --check src/native-layout.js && node --check scripts/prepare-frontend.js",
     "test": "node --test --test-reporter=dot tests/*.test.js",
     "dist:mac:universal": "tauri build --target universal-apple-darwin --bundles dmg",
-    "dist:win": "tauri build --target x86_64-pc-windows-msvc --bundles nsis"
+    "dist:win": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
+    "verify:universal": "node scripts/verify-universal.js",
+    "verify:mac": "bash scripts/verify-macos-release.sh",
+    "test:smoke": "node scripts/smoke-tauri.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.6"

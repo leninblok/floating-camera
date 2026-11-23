@@ -26,7 +26,6 @@
 Скачай установщик на [странице релизов](https://github.com/leninblok/floating-camera/releases):
 
 - Mac с Apple silicon или Intel — один универсальный файл `Kruzhok-…-mac-universal.dmg`;
-- отдельные сборки Mac для arm64 и x64 остаются в релизе как дополнительные варианты;
 - Windows x64 — `Kruzhok-…-windows-x64-Setup.exe`.
 
 На Mac открой DMG и перетащи Кружок в «Программы». На Windows запусти EXE. Репозиторий и релизы публичные; для скачивания вход в GitHub не нужен.
@@ -35,40 +34,56 @@
 
 ## Запуск из исходников
 
-Понадобится Node.js 22.12 или новее:
+Приложение использует Tauri 2: системный WKWebView на Mac и Microsoft Edge WebView2 на Windows. Chromium и Node.js в установщик не входят.
+
+Понадобятся Node.js 22.12+, стабильный Rust и системные инструменты сборки: Xcode Command Line Tools на Mac; Visual Studio Build Tools с C++ и Windows SDK на Windows. Полный список — в [документации Tauri](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm start
 ```
 
-При первом запуске macOS попросит доступ к камере.
+При первом запуске ОС попросит доступ к камере. Микрофон не используется. Если в Windows нет WebView2, установщик загрузит его из Microsoft; для этого нужен интернет.
 
 ## Сборка установщиков
 
-```bash
-npm run dist:mac:unsigned:universal # Mac с Apple silicon и Intel
-npm run dist:mac:unsigned      # Только Mac с Apple silicon
-npm run dist:mac:unsigned:x64  # Mac с Intel
-npm run dist:win               # Windows x64
-```
-
-Сборки появятся в `dist/installers`. Универсальная сборка содержит arm64 и x86_64 в одном приложении. Проверить все Mach-O-файлы можно командой:
+На соответствующей ОС:
 
 ```bash
-npm run verify:universal -- "dist/mac-universal/Кружок.app"
+# Mac с Apple silicon и Intel
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run dist:mac:universal
+
+# Windows x64
+npm run dist:win
 ```
 
-Для подписанной и нотариально заверенной сборки Mac нужны данные App Store Connect из `.env.notarize.example` и команда `npm run dist:mac:universal` (или отдельные `dist:mac:arm64` / `dist:mac:x64`).
+Готовые файлы находятся в `src-tauri/target/<target>/release/bundle/`. Универсальная сборка Mac содержит обе архитектуры в одном приложении. Проверка:
+
+```bash
+npm run verify:universal -- "src-tauri/target/universal-apple-darwin/release/bundle/macos/Кружок.app"
+```
+
+Локальные сборки по умолчанию не подписаны сертификатом издателя. Для подписи и нотариального заверения используйте стандартные переменные [Tauri для macOS](https://v2.tauri.app/distribute/sign/macos/). `verify:mac` проверяет подпись, Gatekeeper и наличие нотариального штампа у подготовленного приложения.
 
 ## Проверка изменений
 
 ```bash
 npm run check
 npm test
-npm run test:smoke
+npm run prepare:frontend
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+npm run test:smoke -- /путь/к/собранному/приложению
 ```
 
-`test:smoke` запускает Electron с синтетическим видео и проверяет появление окна, работу камеры, изменение формы и размера, фокус и перетаскивание. Для диагностики запуска с настоящей камерой используй `KRUZHOK_PROFILE_STARTUP=1 npm start`.
+Smoke-проверка запускает настоящее окно Tauri с искусственной камерой, без доступа к физическим устройствам. Она проверяет первый кадр, геометрию всех форм и размеров, фокус, оформление, перемещение, режим поверх окон и сохранение настроек. GitHub Actions выполняет её на Mac и Windows после сборки установщиков.
+
+`src/native-layout.js` и `renderer.js` используются также в демонстрации на сайте. Старый Electron-код сохранён только в `tests/reference/` как эталон для регрессионных тестов; в приложение он не включается. Нативный слой — `src-tauri/src/main.rs`. Настройки из старой версии импортируются при первом запуске.
+
+## Зависимости
+
+Dependabot еженедельно предлагает обновления npm, Cargo и GitHub Actions. Включены GitHub security alerts и security updates. На каждом push/PR и по расписанию выполняются `npm audit` и RustSec `cargo audit` по зафиксированным lock-файлам; PR дополнительно проходит Dependency Review. Обнаруженная уязвимость уровня moderate и выше останавливает npm-проверку, RustSec останавливается на известных уязвимостях для целевых Mac/Windows.
+
+Автоматических слияний обновлений нет: изменения должны пройти проверки. Аудит ищет известные уязвимости и не заменяет проверку кода.
 
 Проект распространяется по [лицензии MIT](LICENSE).
