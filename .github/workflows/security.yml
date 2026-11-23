@@ -33,7 +33,5 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Install pinned RustSec audit tool
         run: cargo install cargo-audit --version 0.23.0 --locked
-      - name: Resolve lockfile if not present
-        run: cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
       - name: Check shipped Mac and Windows dependencies
         run: cargo audit --file src-tauri/Cargo.lock --target-os macos --target-os windows --target-arch aarch64 --target-arch x86_64

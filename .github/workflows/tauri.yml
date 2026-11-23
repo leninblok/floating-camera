@@ -29,6 +29,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
+      - run: npm run prepare:frontend
       - name: Prepare Rust
         shell: bash
         run: |
@@ -44,12 +45,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ runner.os }}-tauri-v1-${{ hashFiles('src-tauri/Cargo.toml') }}
+          key: ${{ runner.os }}-tauri-v1-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-tauri-v1-
       - name: Compile and test native bindings
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Build installer
-        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
       - name: Exercise packaged app with an artificial camera (macOS)
         if: runner.os == 'macOS'
         run: node scripts/smoke-tauri.js src-tauri/target/universal-apple-darwin/release/bundle/macos/Кружок.app/Contents/MacOS/kruzhok
