@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::Duration};
 use tauri::{Emitter, Manager, LogicalPosition, LogicalSize, WebviewWindow};
-use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder};
+#[cfg(target_os="macos")]
+use tauri::menu::Submenu;
+use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
 struct RuntimeState {
     settings: Mutex<Value>,
