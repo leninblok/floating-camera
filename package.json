@@ -14,7 +14,7 @@
   },
   "scripts": {
     "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/prepare-installers.js && node --check scripts/prepare-macos-package.js && node --check scripts/require-macos-release-credentials.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/prepare-installers.js && node --check scripts/prepare-macos-package.js && node --check scripts/require-macos-release-credentials.js && node --check scripts/verify-universal.js",
     "prepare:installers": "node scripts/prepare-installers.js",
     "dist": "electron-builder --mac",
     "dist:mac:arm64": "electron-builder --mac --arm64",
@@ -30,7 +30,12 @@
     "predist:win": "npm run prepare:installers",
     "verify:mac": "bash scripts/verify-macos-release.sh",
     "test": "node --test tests/*.test.js",
-    "test:smoke": "env -u ELECTRON_RUN_AS_NODE electron tests/electron-smoke.js"
+    "test:smoke": "env -u ELECTRON_RUN_AS_NODE electron tests/electron-smoke.js",
+    "dist:mac:universal": "electron-builder --mac dmg --universal",
+    "dist:mac:unsigned:universal": "ALLOW_UNSIGNED_MACOS_RELEASE=1 electron-builder --mac dmg --universal --config.mac.forceCodeSigning=false --config.mac.notarize=false",
+    "predist:mac:universal": "npm run prepare:installers",
+    "predist:mac:unsigned:universal": "npm run prepare:installers",
+    "verify:universal": "node scripts/verify-universal.js"
   },
   "build": {
     "appId": "io.github.leninblok.kruzhok",

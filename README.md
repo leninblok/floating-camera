@@ -25,11 +25,11 @@
 
 Скачай установщик на [странице релизов](https://github.com/leninblok/floating-camera/releases):
 
-- Mac с Apple silicon — файл `Kruzhok-…-mac-arm64.dmg`;
-- Mac с Intel — `Kruzhok-…-mac-x64.dmg`;
+- Mac с Apple silicon или Intel — один универсальный файл `Kruzhok-…-mac-universal.dmg`;
+- отдельные сборки Mac для arm64 и x64 остаются в релизе как дополнительные варианты;
 - Windows x64 — `Kruzhok-…-windows-x64-Setup.exe`.
 
-На Mac открой DMG и перетащи Кружок в «Программы». На Windows запусти EXE. Репозиторий пока закрытый, поэтому скачать установщики могут только люди с доступом к нему.
+На Mac открой DMG и перетащи Кружок в «Программы». На Windows запусти EXE. Репозиторий и релизы публичные; для скачивания вход в GitHub не нужен.
 
 Сборки пока без цифровой подписи. macOS может остановить первый запуск: после попытки открыть приложение зайди в «Системные настройки» → «Конфиденциальность и безопасность» и нажми «Всё равно открыть» ([инструкция Apple](https://support.apple.com/ru-ru/102445)). Windows тоже может предупредить о неизвестном издателе или заблокировать запуск.
 
@@ -47,14 +47,19 @@ npm start
 ## Сборка установщиков
 
 ```bash
-npm run dist:mac:unsigned      # Mac с Apple silicon
+npm run dist:mac:unsigned:universal # Mac с Apple silicon и Intel
+npm run dist:mac:unsigned      # Только Mac с Apple silicon
 npm run dist:mac:unsigned:x64  # Mac с Intel
 npm run dist:win               # Windows x64
 ```
 
-Сборки появятся в `dist/installers`.
+Сборки появятся в `dist/installers`. Универсальная сборка содержит arm64 и x86_64 в одном приложении. Проверить все Mach-O-файлы можно командой:
 
-Для подписанной и нотариально заверенной сборки Mac нужны данные App Store Connect из `.env.notarize.example` и команда `npm run dist:mac:arm64` или `npm run dist:mac:x64`.
+```bash
+npm run verify:universal -- "dist/mac-universal/Кружок.app"
+```
+
+Для подписанной и нотариально заверенной сборки Mac нужны данные App Store Connect из `.env.notarize.example` и команда `npm run dist:mac:universal` (или отдельные `dist:mac:arm64` / `dist:mac:x64`).
 
 ## Проверка изменений
 
