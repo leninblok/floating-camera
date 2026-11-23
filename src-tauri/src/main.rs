@@ -118,6 +118,10 @@ fn bootstrap(window: WebviewWindow, app: tauri::AppHandle) -> Result<Value, Stri
     let scale = window.scale_factor().map_err(err)?;
     let monitors=window.available_monitors().map_err(err)?.into_iter().enumerate().map(|(id,m)|{
         let area=m.work_area();
+        // Cocoa reports each monitor in its own backing-pixel scale. Convert
+        // to Cocoa points independently, including non-Retina external screens.
+        #[cfg(target_os="macos")]
+        let scale=m.scale_factor();
         json!({"id":id,"scaleFactor":m.scale_factor(),"workArea":{"x":area.position.x as f64/scale,"y":area.position.y as f64/scale,
             "width":area.size.width as f64/scale,"height":area.size.height as f64/scale},
             "bounds":{"x":m.position().x as f64/scale,"y":m.position().y as f64/scale,"width":m.size().width as f64/scale,"height":m.size().height as f64/scale}})

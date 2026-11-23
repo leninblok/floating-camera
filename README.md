@@ -64,7 +64,7 @@ npm run dist:win
 npm run verify:universal -- "src-tauri/target/universal-apple-darwin/release/bundle/macos/Кружок.app"
 ```
 
-Локальные сборки по умолчанию не подписаны сертификатом издателя. Для подписи и нотариального заверения используйте стандартные переменные [Tauri для macOS](https://v2.tauri.app/distribute/sign/macos/). `verify:mac` проверяет подпись, Gatekeeper и наличие нотариального штампа у подготовленного приложения.
+Локальные сборки Mac по умолчанию получают техническую ad-hoc подпись (`signingIdentity: "-"`); сертификата издателя и нотариального заверения у неё нет. Для подписи и нотариального заверения замените `bundle.macOS.signingIdentity` на свою Developer ID identity (или `null` для выбора через переменные окружения) и используйте стандартные переменные [Tauri для macOS](https://v2.tauri.app/distribute/sign/macos/). `verify:mac` проверяет подпись, Gatekeeper и наличие нотариального штампа у подготовленного приложения.
 
 ## Проверка изменений
 
