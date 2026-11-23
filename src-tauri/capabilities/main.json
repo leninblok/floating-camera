@@ -1,0 +1,1 @@
+{"identifier":"main-window","description":"Local camera overlay. No filesystem, shell, microphone or remote-content access.","windows":["main"],"permissions":["core:event:default"]}

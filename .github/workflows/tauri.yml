@@ -1,0 +1,74 @@
+name: Tauri native checks and installers
+on:
+  push:
+    branches: [main, tauri-migration]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: universal-apple-darwin
+            bundle: dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - name: Prepare Rust
+        shell: bash
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          fi
+      - uses: actions/cache/restore@v6.1.0
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-tauri-v1-${{ hashFiles('src-tauri/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-tauri-v1-
+      - name: Compile and test native bindings
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build installer
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - name: Exercise packaged app with an artificial camera (macOS)
+        if: runner.os == 'macOS'
+        run: node scripts/smoke-tauri.js src-tauri/target/universal-apple-darwin/release/bundle/macos/Кружок.app/Contents/MacOS/kruzhok
+      - name: Exercise packaged app with an artificial camera (Windows)
+        if: runner.os == 'Windows'
+        run: node scripts/smoke-tauri.js src-tauri/target/x86_64-pc-windows-msvc/release/kruzhok.exe
+      - uses: actions/cache/save@v6.1.0
+        if: always() && steps.rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: kruzhok-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/
+            src-tauri/Cargo.lock
+          retention-days: 7

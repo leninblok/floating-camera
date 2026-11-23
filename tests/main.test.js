@@ -78,7 +78,7 @@ function harness({ reducedMotion = false, appDefaults = false } = {}) {
     setTimeout: (fn, ms) => { timers.set(++timerId, { fn, at: nowMs + ms }); return timerId; },
     clearTimeout: (id) => timers.delete(id),
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'reference/electron-main.cjs'), 'utf8'), context);
   // Existing geometry regressions use a saved square profile. The fresh
   // launch profile is checked separately and in the Electron smoke test.
   if (!appDefaults) vm.runInContext("shapeMode = 'circle'; aspectRatio = '4:5'; selectedSizePreset = 'compact'; borderEnabled = true", context);
