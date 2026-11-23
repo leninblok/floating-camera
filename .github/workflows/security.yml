@@ -31,7 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: actions/cache@v6.1.0
+        id: audit-cache
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.23.0-${{ runner.os }}
       - name: Install pinned RustSec audit tool
+        if: steps.audit-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --version 0.23.0 --locked
+      # glib belongs to Tauri's Linux GTK backend, absent from both shipped
+      # target dependency trees. Revisit this exception before supporting Linux.
+      # Fail on unsoundness warnings as well as vulnerability-class advisories.
       - name: Check shipped Mac and Windows dependencies
-        run: cargo audit --file src-tauri/Cargo.lock --target-os macos --target-os windows --target-arch aarch64 --target-arch x86_64
+        run: cargo audit --file src-tauri/Cargo.lock --target-os macos --target-os windows --target-arch aarch64 --target-arch x86_64 --deny unsound --ignore RUSTSEC-2024-0429
